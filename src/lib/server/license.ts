@@ -7,13 +7,13 @@ import { sendEventNotification } from './notifications';
 // This key can only VERIFY signatures, not create them
 // The private key is kept secret and used only for license generation
 const LICENSE_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoGJOObrKQyOPrDC+xSVh
-Cq5WeUQqwvAl2xEoI5iOhJtHIvnlxayc2UKt9D5WVWS0dgzi41L7VD2OjTayrbL8
-RxPXYh0EfMtnKoJZyFwN1XdlYk8yUjs2TRXnrw8Y+riuMjFWgUHmWUQTA7yBnJG6
-9efCMUDREHwGglPIKhTstQfSqi2fNO1GCgY1W7JCMnE8CCpwLGvLodbWFUe1CwT0
-OgRZRNWPljc/cX5DLSaB1RXFUnBM4O9YalNCNOR3HvEV/8HULFtDpZT0ZwRbC3K3
-R8GFY97lrqADuWVaEdRRYdr402eAcd4DnRT62OjpEllNbRI3U5Wyj6EmYm3Cmc9Q
-GwIDAQAB
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0QBdmMgQ8U7N0K9i3Vi9
+7upM3jXScg+HF+ebjHwRMEnStsD/kfLL3Lf3pxZEcVBWKDAliVdfo7qsRhFNYke/
+WldbEEBMiEfcjvzCbktSd5Tfdi1R5AVtgQYugefYPUN0NZoB1neoROl9/z3rNy4y
+iRBrZiP9vm97QO3xfqbOclCMo/ZtzwQ5b2nxcgMOrEGYLWd1Ktv/xcJsPzrCwFA4
+NjdOtQ/Cvm00lryTAleJ+nGBn2HihKmW1WckAXXPfiDcoPtUq558c2qF4/nq6skO
+FLvEj3iAFLjfEY3J7GuqRzIkMvxks3fqGGeVB8W4FdP85KOukJ02fZp0IudoM2cl
+9wIDAQAB
 -----END PUBLIC KEY-----`;
 
 export type LicenseType = 'enterprise' | 'smb';
