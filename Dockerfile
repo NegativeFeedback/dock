@@ -88,7 +88,9 @@ RUN MAKEFLAGS="-j$(nproc)" npm ci --ignore-scripts \
 
 # Copy source code and build
 COPY . .
-RUN npm run build
+# --ignore-scripts above also skipped the "prepare" lifecycle script, so
+# .svelte-kit/tsconfig.json (which tsconfig.json extends) doesn't exist yet.
+RUN npx svelte-kit sync && npm run build
 
 # Production dependencies only
 # Preserve better-sqlite3 native addon (no prebuilds exist for Node 24 ABI 137)
