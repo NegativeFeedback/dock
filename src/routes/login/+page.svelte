@@ -8,6 +8,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Loader2, LogIn, Shield, AlertCircle, Network, User, KeyRound, TriangleAlert } from 'lucide-svelte';
 	import { authStore } from '$lib/stores/auth';
+	import { autoLoginTarget } from '$lib/utils/oidc-autologin';
 	import { environments } from '$lib/stores/environment';
 	import { appSettings } from '$lib/stores/settings';
 	import * as Alert from '$lib/components/ui/alert';
@@ -29,6 +30,8 @@
 	let error = $state<string | null>(null);
 	let requiresMfa = $state(false);
 	let providers = $state<AuthProvider[]>([]);
+	// Set by the server when OIDC_AUTOLOGIN is on and there is exactly one provider.
+	let autoLoginUrl = $state<string | null>(null);
 	let selectedProvider = $state('local');
 	let loadingProviders = $state(true);
 
@@ -52,6 +55,7 @@
 			const response = await fetch('/api/auth/providers');
 			const data = await response.json();
 			providers = data.providers || [{ id: 'local', name: 'Local', type: 'local' }];
+			autoLoginUrl = data.autoLoginUrl ?? null;
 			// Set default to first credential provider or first provider
 			const defaultProvider = data.defaultProvider || 'local';
 			selectedProvider = credentialProviders.find(p => p.id === defaultProvider)?.id || credentialProviders[0]?.id || 'local';
@@ -79,9 +83,12 @@
 		// Initialize theme from app settings (no user yet, so fetches from /api/settings/theme)
 		await themeStore.init();
 
-		// Set error from URL if present
+		// searchParams.get() has already decoded this. Decoding again throws on a
+		// literal '%' - which an identity provider is free to put in the reason it
+		// refused a sign-in - and that throw lands before the providers are fetched,
+		// leaving a login page with no way to sign in at all.
 		if (urlError) {
-			error = decodeURIComponent(urlError);
+			error = urlError;
 		}
 
 		// Fetch providers first
@@ -93,6 +100,20 @@
 		// If auth is disabled or already authenticated, redirect
 		if (!$authStore.authEnabled || $authStore.authenticated) {
 			goto(redirectUrl);
+			return;
+		}
+
+		// Go straight to the provider when the operator asked for it. The rules for
+		// when NOT to are the tested ones in autoLoginTarget, so the ways out of a
+		// broken provider live in one place rather than being restated here.
+		const target = autoLoginTarget({
+			enabled: !!autoLoginUrl,
+			oidcInitiateUrls: autoLoginUrl ? [autoLoginUrl] : [],
+			error,
+			localRequested: $page.url.searchParams.get('local') === '1'
+		});
+		if (target) {
+			window.location.href = `${target}?redirect=${encodeURIComponent(redirectUrl)}`;
 		}
 	});
 
@@ -158,14 +179,9 @@
 		<Card.Header class="space-y-1 text-center">
 			<div class="flex justify-center mb-4">
 				<img
-					src="/logo-light.webp"
+					src="/logo.svg"
 					alt="Dockhand Logo"
-					class="h-16 w-auto object-contain dark:hidden"
-				/>
-				<img
-					src="/logo-dark.webp"
-					alt="Dockhand Logo"
-					class="h-16 w-auto object-contain hidden dark:block"
+					class="h-16 w-auto object-contain"
 				/>
 			</div>
 			<Card.Title class="text-2xl font-bold">Welcome back</Card.Title>

@@ -4,7 +4,7 @@ import { getSecretProviderById } from '$lib/server/db';
 import { authorize } from '$lib/server/authorize';
 import { getProvider } from '$lib/server/secretproviders';
 import { UnsupportedOperationError, parseProviderError } from '$lib/server/secretproviders/shared';
-import { probeBulkKeysCached } from '$lib/server/secretproviders/probe-cache';
+import { probeBulkKeysCached, probeRefsCached } from '$lib/server/secretproviders/probe-cache';
 
 /**
  * Live probe of a stored provider: given a bulk selector and/or inline op://
@@ -75,8 +75,7 @@ export const POST: RequestHandler = async ({ params, cookies, request }) => {
 
 	if (refs.length && provider.supportsReferences) {
 		try {
-			const resolved = await provider.resolveSecretReferences(row.config, refs);
-			resolvedRefs = [...resolved.keys()];
+			resolvedRefs = await probeRefsCached(id, provider, row.config, refs);
 		} catch (e) {
 			if (!(e instanceof UnsupportedOperationError)) {
 				return json({ ok: false, error: shortError(e) }, { status: 200 });

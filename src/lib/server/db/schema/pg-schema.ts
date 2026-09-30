@@ -324,6 +324,7 @@ export const gitStacks = pgTable('git_stacks', {
 	stackName: text('stack_name').notNull(),
 	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
 	repositoryId: integer('repository_id').notNull().references(() => gitRepositories.id, { onDelete: 'cascade' }),
+	branch: text('branch'), // Per-stack branch override; null = use repository default
 	composePath: text('compose_path').default('docker-compose.yml'), // Reverted to original value (#1110)
 	envFilePath: text('env_file_path'), // Path to .env file in repository (e.g., ".env", "config/.env.prod")
 	autoUpdate: boolean('auto_update').default(false),
@@ -360,10 +361,63 @@ export const stackSources = pgTable('stack_sources', {
 	// Names (no values) of secret keys injected from the bound provider on the last
 	// deploy, so container inspect can mask them without a live provider call.
 	injectedSecretKeys: text('injected_secret_keys'),
+	// Per-stack icon: a lucide name ('server'), 'selfhst:<ref>', or 'custom:<file>'.
+	// Null -> UI falls back to a generic icon.
+	icon: text('icon'),
 	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow(),
 	updatedAt: timestamp('updated_at', { mode: 'string' }).defaultNow()
 }, (table) => ({
 	stackSourceEnvUnique: unique().on(table.stackName, table.environmentId)
+}));
+
+// Per-container icon override, keyed by (containerName, environmentId). Containers have
+// no DB row of their own and are recreated with a new id but a stable name, so the name
+// is the durable key. Absent row -> automatic image/name icon matching applies.
+export const containerIconOverrides = pgTable('container_icon_overrides', {
+	id: serial('id').primaryKey(),
+	containerName: text('container_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	// A lucide name ('server'), 'selfhst:<ref>', or 'custom:<file>'. Same shape as stack icons.
+	icon: text('icon').notNull(),
+	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow(),
+	updatedAt: timestamp('updated_at', { mode: 'string' }).defaultNow()
+}, (table) => ({
+	containerIconEnvUnique: unique().on(table.containerName, table.environmentId)
+}));
+
+// User-defined organizational tags for containers and stacks. Distinct
+// from Docker labels. GLOBAL tag catalog (unique on name, not env-scoped); assignment
+// rows (container_tags/stack_tags) are keyed by name and stay env-scoped.
+export const tags = pgTable('tags', {
+	id: serial('id').primaryKey(),
+	name: text('name').notNull(),
+	color: text('color').notNull().default('slate'),
+	icon: text('icon'),
+	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
+}, (table) => ({
+	// Case-INSENSITIVE unique on name (lower(name) in the migration) so "Prod" and
+	// "prod" collide; drizzle's DSL can't express that, so it lives in 0016.
+	tagNameUnique: unique().on(table.name)
+}));
+
+export const containerTags = pgTable('container_tags', {
+	id: serial('id').primaryKey(),
+	containerName: text('container_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	tagId: integer('tag_id').notNull().references(() => tags.id, { onDelete: 'cascade' }),
+	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
+}, (table) => ({
+	containerTagUnique: unique().on(table.containerName, table.environmentId, table.tagId)
+}));
+
+export const stackTags = pgTable('stack_tags', {
+	id: serial('id').primaryKey(),
+	stackName: text('stack_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	tagId: integer('tag_id').notNull().references(() => tags.id, { onDelete: 'cascade' }),
+	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
+}, (table) => ({
+	stackTagUnique: unique().on(table.stackName, table.environmentId, table.tagId)
 }));
 
 export const stackEnvironmentVariables = pgTable('stack_environment_variables', {
@@ -471,7 +525,9 @@ export const scheduleExecutions = pgTable('schedule_executions', {
 	logs: text('logs'), // Execution logs/output
 	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
 }, (table) => ({
-	typeIdIdx: index('schedule_executions_type_id_idx').on(table.scheduleType, table.scheduleId)
+	typeIdIdx: index('schedule_executions_type_id_idx').on(table.scheduleType, table.scheduleId),
+	// Powers "runs for this stack/container" lookups without a full table scan.
+	entityEnvIdx: index('schedule_executions_entity_env_idx').on(table.entityName, table.environmentId)
 }));
 
 // =============================================================================
@@ -508,6 +564,8 @@ export const backupDestinations = pgTable('backup_destinations', {
 	envVars: text('env_vars'),
 	flags: text('flags'),
 	hostPath: text('host_path'),
+	cacert: text('cacert'),
+	tlsClientCert: text('tls_client_cert'),
 	policies: text('policies'),
 	lastTestAt: timestamp('last_test_at', { mode: 'string' }),
 	lastTestStatus: text('last_test_status'),

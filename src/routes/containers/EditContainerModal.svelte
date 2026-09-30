@@ -3,9 +3,15 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Pencil, Check, Loader2, X, Layers, Settings, Archive } from 'lucide-svelte';
 	import { currentEnvironment, appendEnvParam } from '$lib/stores/environment';
+	import { containerStore } from '$lib/stores/containers';
+	import ContainerTagsSection from '$lib/components/ContainerTagsSection.svelte';
 	import { page } from '$app/stores'; // BETA GATE: backups feature flag
 	import { focusFirstInput } from '$lib/utils';
+	import ContainerIcon from '$lib/components/ContainerIcon.svelte';
+	import IconPickerModal from '../stacks/IconPickerModal.svelte';
+	import { Box } from 'lucide-svelte';
 	import ContainerSettingsTab from './ContainerSettingsTab.svelte';
+	import { additionalNetworkNames } from '$lib/utils/network-identity';
 	import BackupPanel from './BackupPanel.svelte';
 	import { volumeInfoFromBind } from '$lib/utils/mounts';
 	import { fetchBackupExecutions } from '$lib/utils/backup';
@@ -63,9 +69,11 @@
 		containerId: string;
 		onClose: () => void;
 		onSuccess: () => void;
+		/** Fired after the icon override changes, so the list can refresh its icons. */
+		onIconChanged?: () => void;
 	}
 
-	let { open = $bindable(), containerId, onClose, onSuccess }: Props = $props();
+	let { open = $bindable(), containerId, onClose, onSuccess, onIconChanged }: Props = $props();
 
 	// Config sets
 	let configSets = $state<ConfigSet[]>([]);
@@ -73,6 +81,18 @@
 
 	// Guard to prevent reloading data while user is editing
 	let hasLoadedData = $state(false);
+
+	/** Network list for id-based primary matching; empty on failure (name matching then). */
+	async function fetchKnownNetworks(): Promise<Array<{ name: string; id?: string | null }>> {
+		try {
+			const envParam = $currentEnvironment ? `?env=${$currentEnvironment.id}` : '';
+			const response = await fetch(`/api/networks${envParam}`);
+			if (!response.ok) return [];
+			return await response.json();
+		} catch {
+			return [];
+		}
+	}
 
 	async function fetchConfigSets() {
 		try {
@@ -88,7 +108,44 @@
 	// Form state - Basic
 	let name = $state('');
 	let image = $state('');
+
+	// Per-container icon override (lucide / selfhst:<ref> / custom:container). Persisted
+	// immediately via the name-keyed /api/container-icons endpoint, keyed by name + env.
+	let iconOverride = $state<string | null>(null);
+	let showIconPicker = $state(false);
+
+	async function loadIconOverride(containerName: string) {
+		try {
+			const res = await fetch(appendEnvParam('/api/container-icons', currentEnvId));
+			iconOverride = res.ok ? ((await res.json())[containerName] ?? null) : null;
+		} catch {
+			iconOverride = null;
+		}
+	}
+
+	// Picker emits '' (clear), 'upload:<dataUrl>' (custom upload), or a lucide/selfhst value.
+	async function onIconSelect(value: string) {
+		const target = appendEnvParam(`/api/container-icons/${encodeURIComponent(name)}`, currentEnvId);
+		try {
+			if (!value) {
+				await fetch(target, { method: 'DELETE' });
+				iconOverride = null;
+			} else if (value.startsWith('upload:')) {
+				const image = value.slice('upload:'.length);
+				const res = await fetch(target, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image }) });
+				if (res.ok) iconOverride = (await res.json()).icon;
+			} else {
+				const res = await fetch(target, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ icon: value }) });
+				if (res.ok) iconOverride = (await res.json()).icon;
+			}
+			// Let the list refresh so the row icon reflects the change without an env switch.
+			onIconChanged?.();
+		} catch (e) {
+			console.error('Failed to set container icon:', e);
+		}
+	}
 	let command = $state('');
+	let entrypoint = $state('');
 	let restartPolicy = $state('no');
 	let restartMaxRetries = $state<number | ''>('');
 	let networkMode = $state('bridge');
@@ -177,6 +234,7 @@
 		name: string;
 		image: string;
 		command: string;
+		entrypoint: string;
 		restartPolicy: string;
 		networkMode: string;
 		portMappings: typeof portMappings;
@@ -347,7 +405,11 @@
 			// Parse basic container data
 			name = data.Name.replace(/^\//, '');
 			image = data.Config.Image;
+			loadIconOverride(name);
 			command = data.Config.Cmd ? data.Config.Cmd.map((arg: string) =>
+				arg.includes(' ') ? `"${arg}"` : arg
+			).join(' ') : '';
+			entrypoint = data.Config.Entrypoint ? data.Config.Entrypoint.map((arg: string) =>
 				arg.includes(' ') ? `"${arg}"` : arg
 			).join(' ') : '';
 			restartPolicy = data.HostConfig.RestartPolicy?.Name || 'no';
@@ -422,7 +484,14 @@
 			// Parse connected networks. selectedNetworks holds ADDITIONAL networks only —
 			// the primary lives in networkMode, never in this list (Portainer-style).
 			const networks = data.NetworkSettings?.Networks || {};
-			selectedNetworks = Object.keys(networks).filter(n => n !== networkMode);
+			// Match on network id where both sides report one: Podman names the default
+			// bridge "podman" in the inspect but "bridge" everywhere else, and a name-only
+			// comparison then lists the primary as an extra and re-attaches it (#1619).
+			selectedNetworks = additionalNetworkNames(
+				Object.entries(networks).map(([name, cfg]) => ({ name, id: (cfg as any)?.NetworkID ?? null })),
+				networkMode,
+				await fetchKnownNetworks()
+			);
 
 			// Parse per-network IP/alias config from NetworkSettings
 			const parsedNetConfigs: Record<string, { ipv4Address: string; ipv6Address: string; aliases: string }> = {};
@@ -567,6 +636,7 @@
 				name,
 				image,
 				command,
+				entrypoint,
 				restartPolicy,
 				networkMode,
 				portMappings: JSON.parse(JSON.stringify(portMappings)),
@@ -645,6 +715,7 @@
 		if (name.trim() !== originalConfig.name) return true;
 		if (image.trim() !== originalConfig.image) return true;
 		if (command.trim() !== originalConfig.command) return true;
+		if (entrypoint.trim() !== originalConfig.entrypoint) return true;
 		if (restartPolicy !== originalConfig.restartPolicy) return true;
 		if (networkMode !== originalConfig.networkMode) return true;
 
@@ -731,6 +802,7 @@
 		return JSON.stringify({
 			image: image.trim(),
 			command: command.trim(),
+			entrypoint: entrypoint.trim(),
 			restartPolicy,
 			networkMode,
 			portMappings: portMappings.filter(p => p.containerPort && p.hostPort),
@@ -748,6 +820,7 @@
 		return JSON.stringify({
 			image: originalConfig.image,
 			command: originalConfig.command,
+			entrypoint: originalConfig.entrypoint,
 			restartPolicy: originalConfig.restartPolicy,
 			networkMode: originalConfig.networkMode,
 			portMappings: originalConfig.portMappings.filter(p => p.containerPort && p.hostPort),
@@ -894,7 +967,10 @@
 						labelsObj[l.key] = l.value;
 					});
 
-				const cmd = command.trim() ? parseShellCommand(command.trim()) : undefined;
+				// null (not undefined) when cleared, so JSON.stringify keeps the key and
+				// the server's merge treats it as "clear" and falls back to the image CMD.
+				const cmd = command.trim() ? parseShellCommand(command.trim()) : null;
+				const entrypointArr = entrypoint.trim() ? parseShellCommand(entrypoint.trim()) : null;
 
 				let healthcheck: any = undefined;
 				if (healthcheckEnabled && healthcheckCommand.trim()) {
@@ -966,6 +1042,7 @@
 					env: env.length > 0 ? env : null,
 					labels: labelsObj,
 					cmd,
+					entrypoint: entrypointArr,
 					restartPolicy,
 					restartMaxRetries: restartPolicy === 'on-failure' && restartMaxRetries !== '' ? Number(restartMaxRetries) : null,
 					networkMode,
@@ -1114,6 +1191,15 @@
 	<Dialog.Content class="max-w-4xl w-[calc(100%-2rem)] h-[85vh] p-0 flex flex-col overflow-hidden">
 		<Dialog.Header class="px-5 py-4 border-b bg-muted/30 shrink-0 sticky top-0 z-10">
 			<Dialog.Title class="text-base font-semibold flex items-center gap-1">
+				<button
+					type="button"
+					onclick={() => (showIconPicker = true)}
+					title="Change icon"
+					class="mr-1 rounded p-0.5 hover:bg-muted transition-colors cursor-pointer"
+					aria-label="Change container icon"
+				>
+					<ContainerIcon {image} name={name} override={iconOverride} envId={currentEnvId} class="w-4 h-4" fallbackIcon={Box} showFallbackWhenOff />
+				</button>
 				Edit container
 				{#if isEditingTitle}
 					<span class="ml-1">-</span>
@@ -1198,7 +1284,7 @@
 					<BackupPanel
 						bind:this={backupPanelRef}
 						containerName={name}
-						volumes={volumeMappings.filter(v => v.hostPath && v.containerPath).map(volumeInfoFromBind)}
+						volumes={volumeMappings.filter(v => v.hostPath && v.containerPath).map((v) => volumeInfoFromBind(v))}
 						type="container"
 						onTally={(t) => (backupTally = t)}
 					/>
@@ -1217,13 +1303,20 @@
 					</div>
 				{/if}
 
+				<div class="space-y-1.5 pb-4 border-b">
+					<span class="text-xs font-medium">Tags</span>
+					<ContainerTagsSection containerName={name} envId={currentEnvId} />
+				</div>
+
 				<ContainerSettingsTab
 					mode="edit"
 					{containerId}
 					envId={$currentEnvironment?.id ?? undefined}
 					bind:name
 					bind:image
+					hasImageUpdate={$containerStore.pendingUpdateIds.includes(containerId)}
 					bind:command
+					bind:entrypoint
 					bind:restartPolicy
 					bind:restartMaxRetries
 					bind:networkMode
@@ -1323,3 +1416,5 @@
 		</div>
 	</Dialog.Content>
 </Dialog.Root>
+
+<IconPickerModal bind:open={showIconPicker} value={iconOverride} onselect={onIconSelect} title="Choose a container icon" />

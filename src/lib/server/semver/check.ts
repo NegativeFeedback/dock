@@ -6,7 +6,7 @@
 import { parseImageReference } from '../registry/image-ref';
 import { parseTag } from './tag-parser';
 import { listVersionTags } from './tag-source';
-import { findNewerVersionTag, findNewerImageTag, type FindNewerOptions, type NewerVersion } from './find-newer';
+import { findNewerVersionTag, findNewerImageTag, isRedundantNewerVersion, type FindNewerOptions, type NewerVersion } from './find-newer';
 import type { ArtifactKind } from './manifest-artifact';
 
 /** Probe a single tag's artifact kind + manifest digest. Injected so check.ts stays unit-testable. */
@@ -14,7 +14,7 @@ export type TagKindProbe = (
 	registry: string,
 	repo: string,
 	tag: string
-) => Promise<{ kind: ArtifactKind; digest: string | null }>;
+) => Promise<{ kind: ArtifactKind; digest: string | null; childDigests?: string[] }>;
 
 /**
  * Returns the newer-version suggestion for `imageRef`, or null when the current
@@ -30,7 +30,8 @@ export type TagKindProbe = (
 export async function checkNewerVersion(
 	imageRef: string,
 	options: FindNewerOptions = {},
-	probeTagKind?: TagKindProbe
+	probeTagKind?: TagKindProbe,
+	currentImageDigests: readonly (string | null | undefined)[] = []
 ): Promise<NewerVersion | null> {
 	const { registry, repo, tag } = parseImageReference(imageRef);
 
@@ -48,7 +49,12 @@ export async function checkNewerVersion(
 		tags,
 		async (candidate) => {
 			try {
-				const { kind, digest } = await probeTagKind(registry, repo, candidate);
+				const { kind, digest, childDigests } = await probeTagKind(registry, repo, candidate);
+				// A more specific tag (12.3.3) that resolves to the SAME image the
+				// running container already has is not a real update - and nothing higher
+				// exists, so stop rather than drop to a lower patch (#1572). Matches the
+				// index digest or a per-arch child digest (RepoDigests can hold either).
+				if (isRedundantNewerVersion(digest, currentImageDigests, childDigests)) return { ok: false, redundant: true };
 				return { ok: kind === 'image', digest };
 			} catch {
 				return { ok: true }; // fail-open: never hide a real update on a probe error.

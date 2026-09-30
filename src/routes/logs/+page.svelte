@@ -7,6 +7,7 @@
 	import { page } from '$app/stores';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import * as Select from '$lib/components/ui/select';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { ToggleGroup } from '$lib/components/ui/toggle-pill';
@@ -20,6 +21,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	import type { ContainerInfo } from '$lib/types';
 	import { currentEnvironment, environments, appendEnvParam } from '$lib/stores/environment';
 	import { appSettings, formatLogTimestamps } from '$lib/stores/settings';
+	import ContainerIcon from '$lib/components/ContainerIcon.svelte';
 	import { NoEnvironment } from '$lib/components/ui/empty-state';
 	import { parseLines, renderLineHtml, sortByTimestampStable, type LogEntry } from '$lib/utils/log-entry';
 
@@ -568,6 +570,24 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 				selectContainer(container);
 			}
 		}
+	});
+
+	// React to the ?container= URL param CHANGING while the page is already mounted
+	// (e.g. a cross-host jump from the command palette): the env subscription above
+	// only runs the URL match once per page load, so a later navigation to a new
+	// container - possibly on another host, hence keyed on `containers` too - is
+	// handled here once its container list has loaded.
+	let lastHandledUrlContainer: string | null = null;
+	$effect(() => {
+		const urlContainerId = $page.url.searchParams.get('container');
+		const list = containers; // depend on the fetched list so this re-runs after an env switch
+		if (!urlContainerId || urlContainerId === lastHandledUrlContainer) return;
+		const container = list.find(c => c.id === urlContainerId || c.id.startsWith(urlContainerId));
+		if (!container) return; // list for the target host not loaded yet; re-runs when it is
+		lastHandledUrlContainer = urlContainerId;
+		if (selectedContainer?.id === container.id) return;
+		layoutMode = 'single';
+		selectContainer(container);
 	});
 
 	// Filtered containers based on search
@@ -1644,7 +1664,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 									onclick={() => selectContainer(container)}
 									class="w-full px-3 py-2 text-left text-sm hover:bg-muted transition-colors flex items-center gap-2 {isCurrentSelection ? 'bg-muted' : ''}"
 								>
-									<Box class="w-3.5 h-3.5 shrink-0 {container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'}" />
+									<ContainerIcon image={container.image} name={container.name} class="w-3.5 h-3.5" fallbackClass={container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'} showFallbackWhenOff />
 									<span class="font-medium truncate">{container.name}</span>
 									<span class="text-muted-foreground text-xs truncate">({container.image})</span>
 									{#if isCurrentSelection}
@@ -1671,15 +1691,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		{#if layoutMode === 'multi' || layoutMode === 'grouped'}
 			<div class="w-64 shrink-0 border rounded-lg overflow-hidden flex flex-col bg-background">
 				<div class="px-3 py-2 border-b bg-muted/30">
-					<div class="relative">
-						<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-						<Input
-							type="text"
-							placeholder="Filter containers..."
-							bind:value={searchQuery}
-							class="pl-8 h-8 text-sm"
-						/>
-					</div>
+					<SearchInput bind:value={searchQuery} placeholder="Filter containers..." class="h-8 text-sm" />
 				</div>
 				{#if layoutMode === 'grouped'}
 					<!-- Grouped mode selection controls -->
@@ -1780,7 +1792,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 											{/if}
 										</button>
 										<GripVertical class="w-3 h-3 shrink-0 text-muted-foreground/50 cursor-grab active:cursor-grabbing" />
-										<Box class="w-3 h-3 shrink-0 {container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'}" />
+										<ContainerIcon image={container.image} name={container.name} class="w-3 h-3" fallbackClass={container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'} showFallbackWhenOff />
 										<div class="flex-1 min-w-0">
 											<div class="font-medium truncate text-xs leading-tight">{container.name}</div>
 											<div class="text-2xs text-muted-foreground truncate leading-tight">{container.image}</div>
@@ -1823,7 +1835,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 												<div class="w-3.5 h-3.5 rounded border-2 border-muted-foreground/30"></div>
 											{/if}
 										</div>
-										<Box class="w-3 h-3 shrink-0 {container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'}" />
+										<ContainerIcon image={container.image} name={container.name} class="w-3 h-3" fallbackClass={container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'} showFallbackWhenOff />
 										<div class="flex-1 min-w-0">
 											<div class="font-medium truncate text-xs leading-tight">{container.name}</div>
 											<div class="text-2xs text-muted-foreground truncate leading-tight">{container.image}</div>
@@ -1885,7 +1897,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 											{/if}
 										</button>
 									{/if}
-									<Box class="w-3 h-3 shrink-0 {container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'}" />
+									<ContainerIcon image={container.image} name={container.name} class="w-3 h-3" fallbackClass={container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'} showFallbackWhenOff />
 									<div class="flex-1 min-w-0">
 										<div class="font-medium truncate text-xs leading-tight">{container.name}</div>
 										<div class="text-2xs text-muted-foreground truncate leading-tight">{container.image}</div>

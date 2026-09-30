@@ -43,6 +43,7 @@
 	import AnimateIconsToggle from '$lib/components/AnimateIconsToggle.svelte';
 	import IndentGuidesToggle from '$lib/components/IndentGuidesToggle.svelte';
 	import ColoredActionsToggle from '$lib/components/ColoredActionsToggle.svelte';
+	import EditorThemeSelector from '$lib/components/EditorThemeSelector.svelte';
 	import { themeStore } from '$lib/stores/theme';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 
@@ -751,6 +752,20 @@
 			</Card.Root>
 
 			</div>
+
+			<!-- Editor theme on its own full-width row so the live preview isn't cramped. -->
+			<Card.Root>
+				<Card.Header>
+					<Card.Title class="flex items-center gap-2">
+						<Palette class="w-5 h-5" />
+						Editor theme
+					</Card.Title>
+					<Card.Description>Color theme for the code editor, with a live preview.</Card.Description>
+				</Card.Header>
+				<Card.Content>
+					<EditorThemeSelector userId={profile.id} />
+				</Card.Content>
+			</Card.Root>
 		</div>
 	{/if}
 </div>

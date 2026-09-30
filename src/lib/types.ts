@@ -14,6 +14,9 @@ export interface NewerVersion {
 	digest?: string;
 }
 
+/** Terminal connection mode: an interactive `docker exec` shell, or `docker attach` to PID 1. */
+export type TerminalMode = 'exec' | 'attach';
+
 export interface ContainerInfo {
 	id: string;
 	name: string;
@@ -103,7 +106,7 @@ export interface NetworkInfo {
 export interface StackInfo {
 	name: string;
 	services: string[];
-	status: 'running' | 'partial' | 'stopped';
+	status: 'running' | 'partial' | 'restarting' | 'stopped';
 	containers: Array<{
 		id: string;
 		name: string;
@@ -186,7 +189,7 @@ export interface GitRepository {
 }
 
 // Grid column configuration types
-export type GridId = 'containers' | 'images' | 'imageTags' | 'networks' | 'stacks' | 'volumes' | 'activity' | 'schedules' | 'audit' | 'environments' | 'backupDestinations' | 'backups' | 'repoSnapshots' | 'vulnerabilities';
+export type GridId = 'containers' | 'images' | 'imageTags' | 'networks' | 'stacks' | 'volumes' | 'activity' | 'schedules' | 'audit' | 'environments' | 'backupDestinations' | 'backups' | 'repoSnapshots' | 'vulnerabilities' | 'deploys';
 
 export interface ColumnConfig {
 	id: string;
@@ -201,6 +204,10 @@ export interface ColumnConfig {
 	grow?: boolean; // If true, column expands to fill remaining space
 	noTruncate?: boolean; // If true, content won't be truncated with ellipsis
 	hint?: string; // Tooltip on column header
+	defaultVisible?: boolean; // If false, column is hidden by default (user can enable it in preferences)
+	// A column holding two metrics (e.g. Disk I/O = read/write) cycles a header click
+	// through these (sortField, direction) states instead of a plain asc/desc toggle (#1111).
+	sortCycle?: { field: string; direction: 'asc' | 'desc' }[];
 }
 
 export interface ColumnPreference {

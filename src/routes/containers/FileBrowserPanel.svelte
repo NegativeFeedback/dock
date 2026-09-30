@@ -36,7 +36,8 @@
 		ArrowUp,
 		ArrowDown,
 		Shield,
-		TextCursorInput
+		TextCursorInput,
+		UserCog
 	} from 'lucide-svelte';
 	import { toast } from 'svelte-sonner';
 	import { LoadingState } from '$lib/components/ui/loading-state';
@@ -186,6 +187,7 @@
 	let showCreateModal = $state(false);
 	let createType = $state<'file' | 'directory'>('file');
 	let createName = $state('');
+	let createOwner = $state('');
 	let creating = $state(false);
 
 	// Rename modal state
@@ -199,6 +201,13 @@
 	let chmodEntry = $state<FileEntry | null>(null);
 	let chmodMode = $state('644');
 	let chmodRecursive = $state(false);
+
+	// Chown modal state
+	let showChownModal = $state(false);
+	let chownEntry = $state<FileEntry | null>(null);
+	let chownOwner = $state('');
+	let chownRecursive = $state(false);
+	let changingOwner = $state(false);
 	let changingPerms = $state(false);
 
 	// Permission checkboxes state (owner, group, others - read, write, execute)
@@ -533,7 +542,7 @@
 			const res = await fetch(`/api/containers/${effectiveContainerId}/files/create?${params}`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ path: containerPath, type: createType })
+				body: JSON.stringify({ path: containerPath, type: createType, owner: createOwner.trim() || undefined })
 			});
 
 			const data = await res.json();
@@ -545,6 +554,7 @@
 			toast.success(`${createType === 'file' ? 'File' : 'Directory'} created`);
 			showCreateModal = false;
 			createName = '';
+			createOwner = '';
 			loadDirectory(currentPath);
 		} catch (err: any) {
 			toast.error(err.message || 'Failed to create');
@@ -698,6 +708,50 @@
 		}
 	}
 
+	// Change ownership
+	function openChownModal(entry: FileEntry) {
+		chownEntry = entry;
+		chownOwner = entry.owner || '';
+		chownRecursive = false;
+		showChownModal = true;
+	}
+
+	async function handleChown() {
+		if (!chownEntry || !chownOwner.trim()) {
+			toast.error('Owner is required');
+			return;
+		}
+
+		changingOwner = true;
+		try {
+			const fullPath = currentPath === '/' ? `/${chownEntry.name}` : `${currentPath}/${chownEntry.name}`;
+			const containerPath = getContainerPath(fullPath);
+			const params = new URLSearchParams();
+			if (envId) params.set('env', envId.toString());
+
+			const res = await fetch(`/api/containers/${effectiveContainerId}/files/chown?${params}`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ path: containerPath, owner: chownOwner.trim(), recursive: chownRecursive })
+			});
+
+			const data = await res.json();
+
+			if (!res.ok) {
+				throw new Error(data.error || 'Failed to change owner');
+			}
+
+			toast.success('Owner changed');
+			showChownModal = false;
+			chownEntry = null;
+			loadDirectory(currentPath);
+		} catch (err: any) {
+			toast.error(err.message || 'Failed to change owner');
+		} finally {
+			changingOwner = false;
+		}
+	}
+
 	// Format file size
 	function formatSize(bytes: number): string {
 		if (bytes === 0) return '-';
@@ -732,8 +786,12 @@
 		}
 	}
 
-	// Load directory contents
-	async function loadDirectory(path: string) {
+	// Bumped on every load so a late fallback can tell the user navigated since
+	let loadSeq = 0;
+
+	// Load directory contents; resolves false when the listing failed
+	async function loadDirectory(path: string): Promise<boolean> {
+		loadSeq++;
 		loading = true;
 		error = null;
 
@@ -806,9 +864,11 @@
 			} else {
 				entries = data.entries || [];
 			}
+			return true;
 		} catch (err: any) {
 			error = err.message;
 			entries = [];
+			return false;
 		} finally {
 			loading = false;
 		}
@@ -928,7 +988,16 @@
 		currentPath = _path;
 		entries = [];
 		error = null;
-		loadDirectory(_path);
+		let stale = false;
+		const firstLoad = loadDirectory(_path);
+		const seq = loadSeq;
+		firstLoad.then((ok) => {
+			// A WORKDIR that is missing or unreadable opens root instead of an error (#1285)
+			if (!ok && !stale && seq === loadSeq && _mode === 'container' && _path !== '/') loadDirectory('/');
+		});
+		return () => {
+			stale = true;
+		};
 	});
 </script>
 
@@ -970,7 +1039,7 @@
 				variant="ghost"
 				size="icon"
 				class="h-7 w-7"
-				onclick={() => { createType = 'file'; createName = ''; showCreateModal = true; }}
+				onclick={() => { createType = 'file'; createName = ''; createOwner = ''; showCreateModal = true; }}
 				title="New file"
 			>
 				<FilePlus class="w-3.5 h-3.5" />
@@ -979,7 +1048,7 @@
 				variant="ghost"
 				size="icon"
 				class="h-7 w-7"
-				onclick={() => { createType = 'directory'; createName = ''; showCreateModal = true; }}
+				onclick={() => { createType = 'directory'; createName = ''; createOwner = ''; showCreateModal = true; }}
 				title="New directory"
 			>
 				<FolderPlus class="w-3.5 h-3.5" />
@@ -1196,6 +1265,15 @@
 										>
 											<Shield class="w-3 h-3" />
 										</Button>
+										<Button
+											variant="ghost"
+											size="icon"
+											class="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+											onclick={(e: MouseEvent) => { e.stopPropagation(); openChownModal(entry); }}
+											title="Change owner"
+										>
+											<UserCog class="w-3 h-3" />
+										</Button>
 										<ConfirmPopover
 											open={confirmDeleteEntry === entry.name}
 											action="Delete"
@@ -1348,6 +1426,18 @@
 					onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') handleCreate(); }}
 				/>
 			</div>
+			<div class="space-y-2">
+				<Label for="create-owner">Owner (optional)</Label>
+				<Input
+					id="create-owner"
+					bind:value={createOwner}
+					placeholder="e.g. 1000:1000 or www-data"
+					onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') handleCreate(); }}
+				/>
+				<p class="text-xs text-muted-foreground">
+					Leave blank to use the container's default user (usually root).
+				</p>
+			</div>
 			<p class="text-xs text-muted-foreground">
 				Will be created in: {currentPath}
 			</p>
@@ -1474,6 +1564,51 @@
 			<Button variant="outline" onclick={() => showChmodModal = false}>Cancel</Button>
 			<Button onclick={handleChmod} disabled={changingPerms || !chmodMode.trim()}>
 				{#if changingPerms}
+					<Loader2 class="w-4 h-4 mr-2 animate-spin" />
+				{/if}
+				Apply
+			</Button>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
+<Dialog.Root bind:open={showChownModal}>
+	<Dialog.Content class="max-w-md">
+		<Dialog.Header>
+			<Dialog.Title>Change owner</Dialog.Title>
+		</Dialog.Header>
+		<div class="space-y-4 py-4">
+			{#if chownEntry}
+				<p class="text-sm text-muted-foreground">{chownEntry.name}</p>
+				{#if chownEntry.owner}
+					<p class="text-xs text-muted-foreground">Current: {chownEntry.owner}</p>
+				{/if}
+			{/if}
+
+			<div class="space-y-2">
+				<Label for="chown-owner">Owner</Label>
+				<Input
+					id="chown-owner"
+					bind:value={chownOwner}
+					placeholder="e.g. 1000:1000 or www-data"
+					onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') handleChown(); }}
+				/>
+				<p class="text-xs text-muted-foreground">
+					A user or user:group. Numeric ids work even when the name is not in the container.
+				</p>
+			</div>
+
+			{#if chownEntry?.type === 'directory'}
+				<label class="flex items-center gap-2 text-sm">
+					<input type="checkbox" bind:checked={chownRecursive} class="rounded" />
+					Apply recursively
+				</label>
+			{/if}
+		</div>
+		<Dialog.Footer>
+			<Button variant="outline" onclick={() => showChownModal = false}>Cancel</Button>
+			<Button onclick={handleChown} disabled={changingOwner || !chownOwner.trim()}>
+				{#if changingOwner}
 					<Loader2 class="w-4 h-4 mr-2 animate-spin" />
 				{/if}
 				Apply

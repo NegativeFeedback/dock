@@ -456,7 +456,16 @@
 											<UndoDot class="w-3.5 h-3.5 text-green-500 glow-green" />
 										</span>
 									{/if}
-									<span class="font-medium truncate">{env.name}</span>
+									{#if $canAccess('environments', 'edit')}
+										<button
+											type="button"
+											class="font-medium truncate text-left hover:underline cursor-pointer"
+											title="Edit environment"
+											onclick={() => openEditEnvModal(env)}
+										>{env.name}</button>
+									{:else}
+										<span class="font-medium truncate">{env.name}</span>
+									{/if}
 								</div>
 							</Table.Cell>
 

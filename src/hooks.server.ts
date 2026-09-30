@@ -1,6 +1,7 @@
 // v1.0.12
+import '$lib/server/crash-guard.js';
 import '$lib/server/dns-dispatcher.js';
-import { initDatabase, hasAdminUser } from '$lib/server/db';
+import { initDatabase, hasAnyUser } from '$lib/server/db';
 import { startSubprocesses, stopSubprocesses } from '$lib/server/subprocess-manager';
 import { startScheduler } from '$lib/server/scheduler';
 import { isAuthEnabled, validateSession } from '$lib/server/auth';
@@ -12,6 +13,7 @@ import { initCryptoFallback } from '$lib/server/crypto-fallback';
 import { detectHostDataDir } from '$lib/server/host-path';
 import { listContainers, removeContainer } from '$lib/server/docker';
 import { migrateCredentials } from '$lib/server/encryption';
+import { validateStacksDirAtStartup } from '$lib/server/stacks';
 import { gzipSync } from 'node:zlib';
 import { rmSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -19,6 +21,7 @@ import type { HandleServerError, Handle } from '@sveltejs/kit';
 import { redirect } from '@sveltejs/kit';
 import { startRssTracker, stopRssTracker, rssBeforeOp, rssAfterOp } from '$lib/server/rss-tracker';
 import { getClientIp } from '$lib/server/client-ip';
+import { isPublicPath } from '$lib/server/public-paths-core';
 import { BACKUPS_ENABLED, API_DOCS_ENABLED } from '$lib/server/features';
 // Side-effect import: installs globalThis.__authenticateWsUpgrade and
 // globalThis.__canAccessEnvForUser used by the raw WS upgrade handlers in
@@ -144,6 +147,7 @@ if (!initialized) {
 
 		setServerStartTime(); // Track when server started
 		initDatabase();
+		validateStacksDirAtStartup();
 
 		// Migrate plain text credentials to encrypted storage.
 		// This also handles key rotation if ENCRYPTION_KEY env var differs from the
@@ -255,34 +259,11 @@ function isBearerRateLimited(ip: string): boolean {
 	return true;
 }
 
-// Routes that don't require authentication
-const PUBLIC_PATHS = [
-	'/login',
-	'/api/auth/login',
-	'/api/auth/logout',
-	'/api/auth/session',
-	'/api/auth/settings',
-	'/api/auth/providers',
-	'/api/auth/oidc',
-	'/api/license',
-	'/api/changelog',
-	'/api/dependencies',
-	'/api/health',
-	'/api/settings/theme',
-	'/api/docs'
-];
-
-// Check if path is public
-function isPublicPath(pathname: string): boolean {
-	// Webhook endpoints have their own auth (signature/secret verification)
-	if (pathname.match(/^\/api\/git\/stacks\/\d+\/webhook$/)) return true;
-	if (pathname.match(/^\/api\/git\/webhook\/\d+$/)) return true;
-
-	return PUBLIC_PATHS.some(path => pathname === path || pathname.startsWith(path + '/'));
-}
-
-// Check if path is a static asset
+// True only for real static files. API routes are never static, even when a path
+// ends in an asset-like extension (a route parameter can), so they always go through
+// the normal request handling below.
 function isStaticAsset(pathname: string): boolean {
+	if (pathname.startsWith('/api/')) return false;
 	return pathname.startsWith('/_app/') ||
 		pathname.startsWith('/favicon') ||
 		pathname.endsWith('.webp') ||
@@ -377,10 +358,12 @@ export const handle: Handle = async ({ event, resolve }) => {
 
 		// If not authenticated
 		if (!user) {
-			// Special case: allow user creation when auth is enabled but no admin exists yet
-			// This enables the first admin user to be created during initial setup
-			const noAdminSetupMode = !(await hasAdminUser());
-			if (noAdminSetupMode && event.url.pathname === '/api/users' && event.request.method === 'POST') {
+			// Initial setup only: allow creating the very first account when NO user exists
+			// yet (there is no one to authenticate as). Once any account exists, creation
+			// goes through the normal authenticated path. Bounding this on any-user (not the
+			// Admin role) keeps it from reopening when accounts exist but no admin does.
+			const firstRunSetup = !(await hasAnyUser());
+			if (firstRunSetup && event.url.pathname === '/api/users' && event.request.method === 'POST') {
 				return requestContext.run(ctx, async () => compressResponse(event.request, await resolve(event)));
 			}
 

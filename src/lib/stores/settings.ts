@@ -7,6 +7,11 @@ import {
 	parseTimestamp,
 	type DateTimeFormatters
 } from '$lib/utils/date-format';
+import {
+	DEFAULT_STACK_LOG_OPERATIONS,
+	sanitizeStackLogOperations,
+	type StackLogOperation
+} from '$lib/utils/stack-log-operations';
 
 export type TimeFormat = '12h' | '24h';
 export type DateFormat = 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD' | 'DD.MM.YYYY';
@@ -32,6 +37,8 @@ export interface AppSettings {
 	eventCleanupEnabled: boolean;
 	scannerCleanupCron: string;
 	scannerCleanupEnabled: boolean;
+	deployLogReconcileCron: string;
+	deployLogReconcileEnabled: boolean;
 	logBufferSizeKb: number;  // legacy, retained for migration — UI uses logMaxLines
 	logMaxLines: number;       // line-count cap for the log buffer (replaces KB-based limit)
 	defaultTimezone: string;
@@ -50,11 +57,14 @@ export interface AppSettings {
 	defaultBackupImage: string;
 	honorProxyLabels: boolean;
 	showImageChangelogLinks: boolean;
+	// Fetch app logos from selfh.st for container icons (off by default; opt-in).
+	useSelfhstIcons: boolean;
 	showWhatsNew: boolean;   // show the "What's New" modal after an upgrade (#1235)
 	protectScannerImages: boolean;
 	// Scanner Advanced settings (#1219). Empty values = use auto-detection.
 	defaultScannerNetworkMode: string;   // '' | 'host' | 'bridge' | 'none' | <custom-network>
 	defaultScannerDns: string[];         // ['1.1.1.1', '8.8.8.8']; empty = inherit
+	stackLogOperations: StackLogOperation[]; // stack ops that show the log popover (#1558)
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -75,6 +85,8 @@ const DEFAULT_SETTINGS: AppSettings = {
 	eventCleanupEnabled: true,
 	scannerCleanupCron: '0 3 * * 0',
 	scannerCleanupEnabled: true,
+	deployLogReconcileCron: '0 4 * * *',
+	deployLogReconcileEnabled: true,
 	logBufferSizeKb: 500,
 	logMaxLines: 2000,
 	defaultTimezone: 'UTC',
@@ -91,10 +103,12 @@ const DEFAULT_SETTINGS: AppSettings = {
 	labelFilterMode: 'any',
 	honorProxyLabels: true,
 	showImageChangelogLinks: true,
+	useSelfhstIcons: false,
 	showWhatsNew: true,
 	protectScannerImages: true,
 	defaultScannerNetworkMode: '',
 	defaultScannerDns: [],
+	stackLogOperations: DEFAULT_STACK_LOG_OPERATIONS,
 	defaultComposeTemplate: `version: "3.8"
 
 services:
@@ -164,6 +178,8 @@ function createSettingsStore() {
 					eventCleanupEnabled: settings.eventCleanupEnabled ?? DEFAULT_SETTINGS.eventCleanupEnabled,
 					scannerCleanupCron: settings.scannerCleanupCron ?? DEFAULT_SETTINGS.scannerCleanupCron,
 					scannerCleanupEnabled: settings.scannerCleanupEnabled ?? DEFAULT_SETTINGS.scannerCleanupEnabled,
+					deployLogReconcileCron: settings.deployLogReconcileCron ?? DEFAULT_SETTINGS.deployLogReconcileCron,
+					deployLogReconcileEnabled: settings.deployLogReconcileEnabled ?? DEFAULT_SETTINGS.deployLogReconcileEnabled,
 					logBufferSizeKb: settings.logBufferSizeKb ?? DEFAULT_SETTINGS.logBufferSizeKb,
 					logMaxLines: deriveLogMaxLines(settings),
 					defaultTimezone: settings.defaultTimezone ?? DEFAULT_SETTINGS.defaultTimezone,
@@ -182,10 +198,12 @@ function createSettingsStore() {
 					defaultBackupImage: settings.defaultBackupImage ?? DEFAULT_SETTINGS.defaultBackupImage,
 					honorProxyLabels: settings.honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
 					showImageChangelogLinks: settings.showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+					useSelfhstIcons: settings.useSelfhstIcons ?? DEFAULT_SETTINGS.useSelfhstIcons,
 					showWhatsNew: settings.showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 					protectScannerImages: settings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 					defaultScannerNetworkMode: settings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
-					defaultScannerDns: Array.isArray(settings.defaultScannerDns) ? settings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns
+					defaultScannerDns: Array.isArray(settings.defaultScannerDns) ? settings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns,
+					stackLogOperations: sanitizeStackLogOperations(settings.stackLogOperations)
 				});
 			}
 		} catch {
@@ -223,6 +241,8 @@ function createSettingsStore() {
 					eventCleanupEnabled: updatedSettings.eventCleanupEnabled ?? DEFAULT_SETTINGS.eventCleanupEnabled,
 					scannerCleanupCron: updatedSettings.scannerCleanupCron ?? DEFAULT_SETTINGS.scannerCleanupCron,
 					scannerCleanupEnabled: updatedSettings.scannerCleanupEnabled ?? DEFAULT_SETTINGS.scannerCleanupEnabled,
+					deployLogReconcileCron: updatedSettings.deployLogReconcileCron ?? DEFAULT_SETTINGS.deployLogReconcileCron,
+					deployLogReconcileEnabled: updatedSettings.deployLogReconcileEnabled ?? DEFAULT_SETTINGS.deployLogReconcileEnabled,
 					logBufferSizeKb: updatedSettings.logBufferSizeKb ?? DEFAULT_SETTINGS.logBufferSizeKb,
 					logMaxLines: deriveLogMaxLines(updatedSettings),
 					defaultTimezone: updatedSettings.defaultTimezone ?? DEFAULT_SETTINGS.defaultTimezone,
@@ -241,10 +261,12 @@ function createSettingsStore() {
 					defaultBackupImage: updatedSettings.defaultBackupImage ?? DEFAULT_SETTINGS.defaultBackupImage,
 					honorProxyLabels: updatedSettings.honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
 					showImageChangelogLinks: updatedSettings.showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+					useSelfhstIcons: updatedSettings.useSelfhstIcons ?? DEFAULT_SETTINGS.useSelfhstIcons,
 					showWhatsNew: updatedSettings.showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 					protectScannerImages: updatedSettings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 					defaultScannerNetworkMode: updatedSettings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
-					defaultScannerDns: Array.isArray(updatedSettings.defaultScannerDns) ? updatedSettings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns
+					defaultScannerDns: Array.isArray(updatedSettings.defaultScannerDns) ? updatedSettings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns,
+					stackLogOperations: sanitizeStackLogOperations(updatedSettings.stackLogOperations)
 				});
 			}
 		} catch (error) {
@@ -278,6 +300,13 @@ function createSettingsStore() {
 				return newSettings;
 			});
 		},
+		setStackLogOperations: (value: StackLogOperation[]) => {
+			const clean = sanitizeStackLogOperations(value);
+			update((current) => {
+				saveSettings({ stackLogOperations: clean });
+				return { ...current, stackLogOperations: clean };
+			});
+		},
 		setShowStoppedContainers: (value: boolean) => {
 			update((current) => {
 				const newSettings = { ...current, showStoppedContainers: value };
@@ -289,6 +318,13 @@ function createSettingsStore() {
 			update((current) => {
 				const newSettings = { ...current, highlightUpdates: value };
 				saveSettings({ highlightUpdates: value });
+				return newSettings;
+			});
+		},
+		setUseSelfhstIcons: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, useSelfhstIcons: value };
+				saveSettings({ useSelfhstIcons: value });
 				return newSettings;
 			});
 		},
@@ -401,6 +437,20 @@ function createSettingsStore() {
 			update((current) => {
 				const newSettings = { ...current, scannerCleanupEnabled: value };
 				saveSettings({ scannerCleanupEnabled: value });
+				return newSettings;
+			});
+		},
+		setDeployLogReconcileCron: (value: string) => {
+			update((current) => {
+				const newSettings = { ...current, deployLogReconcileCron: value };
+				saveSettings({ deployLogReconcileCron: value });
+				return newSettings;
+			});
+		},
+		setDeployLogReconcileEnabled: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, deployLogReconcileEnabled: value };
+				saveSettings({ deployLogReconcileEnabled: value });
 				return newSettings;
 			});
 		},

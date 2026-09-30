@@ -5,8 +5,9 @@
 	import * as Tabs from '$lib/components/ui/tabs';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
-	import { Loader2, Box, Info, Layers, Cpu, MemoryStick, HardDrive, Network, Shield, Settings2, Code, Copy, Check, XCircle, Activity, Wifi, Pencil, RefreshCw, X, Folder, FolderOpen, Moon, Tags, ExternalLink, Gpu, Globe, Link, Unlink, Play, Square as SquareIcon, RotateCw, Trash2 } from 'lucide-svelte';
+	import { Loader2, Box, Info, Layers, Cpu, MemoryStick, HardDrive, Network, Shield, Settings2, Code, Copy, Check, XCircle, Activity, Wifi, Pencil, RefreshCw, X, Folder, FolderOpen, Moon, Tags, ExternalLink, Gpu, Globe, Link, Unlink, Play, Square as SquareIcon, RotateCw, Trash2, CircleArrowUp } from 'lucide-svelte';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
+	import ContainerIcon from '$lib/components/ContainerIcon.svelte';
 	import * as Select from '$lib/components/ui/select';
 	import { toast } from 'svelte-sonner';
 	import * as Tooltip from '$lib/components/ui/tooltip';
@@ -17,10 +18,13 @@
 	import { Label } from '$lib/components/ui/label';
 	import { currentEnvironment, appendEnvParam, environments } from '$lib/stores/environment';
 	import ImageLayersView from '../images/ImageLayersView.svelte';
+	import ContainerComposeTab from './ContainerComposeTab.svelte';
 	import LogsPanel from '../logs/LogsPanel.svelte';
 	import FileBrowserPanel from './FileBrowserPanel.svelte';
-	import { formatDateTime } from '$lib/stores/settings';
+	import { fileBrowserStartPath } from '$lib/utils/file-browser-start';
+	import { formatDateTime, appSettings } from '$lib/stores/settings';
 	import { formatHostPortUrl } from '$lib/utils/url';
+	import { containerStore } from '$lib/stores/containers';
 
 	interface Props {
 		open: boolean;
@@ -35,11 +39,25 @@
 		onRestart?: (id: string) => Promise<void> | void;
 		onRemove?: (id: string) => Promise<void> | void;
 		onEdit?: (id: string) => void;
+		/** Runs the image update. The parent owns the update modal, so this closes ours. */
+		onUpdate?: (id: string, name: string) => void;
 	}
 
-	let { open = $bindable(), containerId, containerName, onRename, onStart, onStop, onRestart, onRemove, onEdit }: Props = $props();
+	let { open = $bindable(), containerId, containerName, onRename, onStart, onStop, onRestart, onRemove, onEdit, onUpdate }: Props = $props();
+
+	// Whether this container has a newer image waiting, from the same store the list reads.
+	const hasImageUpdate = $derived($containerStore.pendingUpdateIds.includes(containerId));
+
+	function doUpdate() {
+		if (!onUpdate) return;
+		// The update recreates the container, so this view's data is about to go stale.
+		open = false;
+		onUpdate(containerId, displayName || containerId.slice(0, 12));
+	}
 
 	// Confirmation-popover open state for the destructive actions in the header.
+	let confirmUpdateOpen = $state(false);
+	let confirmUpdateImageOpen = $state(false);
 	let confirmStopOpen = $state(false);
 	let confirmRestartOpen = $state(false);
 	let confirmRemoveOpen = $state(false);
@@ -640,7 +658,7 @@
 	<Dialog.Content class="max-w-6xl w-[calc(100%-2rem)] h-[calc(100vh-2rem)] flex flex-col">
 		<Dialog.Header class="shrink-0">
 			<Dialog.Title class="flex items-center gap-2">
-				<Box class="w-5 h-5" />
+				<ContainerIcon image={containerData?.Config?.Image ?? ''} name={displayName} class="w-5 h-5" fallbackIcon={Box} showFallbackWhenOff />
 				Container details:
 				{#if isEditing}
 					<input
@@ -723,6 +741,21 @@
 					<div class="ml-auto mr-6 flex items-center gap-1">
 						<!-- Lifecycle actions (#461). Mirrors the per-row action set on the containers page;
 						     non-destructive actions refresh the inspect data in place, Delete closes the modal. -->
+						{#if hasImageUpdate && onUpdate}
+							<ConfirmPopover
+								open={confirmUpdateOpen}
+								action="Update"
+								itemType="container"
+								itemName={displayName || containerId.slice(0, 12)}
+								title="Update available - click to update"
+								onConfirm={doUpdate}
+								onOpenChange={(o) => confirmUpdateOpen = o}
+							>
+								{#snippet children({ open })}
+									<CircleArrowUp class="w-4 h-4 text-amber-500 {open ? '' : 'hover:text-amber-400'} transition-colors {$appSettings.highlightUpdates ? 'glow-amber' : ''}" />
+								{/snippet}
+							</ConfirmPopover>
+						{/if}
 						{#if containerData.State?.Running}
 							{#if onStop}
 								<ConfirmPopover
@@ -833,6 +866,7 @@
 						<Tabs.Trigger value="security" onclick={() => showLogs = false}>Security</Tabs.Trigger>
 						<Tabs.Trigger value="resources" onclick={() => showLogs = false}>Resources</Tabs.Trigger>
 						<Tabs.Trigger value="health" onclick={() => showLogs = false}>Health</Tabs.Trigger>
+						<Tabs.Trigger value="compose" onclick={() => showLogs = false}>Compose</Tabs.Trigger>
 					</Tabs.List>
 
 					<!-- Overview Tab -->
@@ -888,7 +922,7 @@
 										<div class="h-8 flex items-center justify-center text-xs text-muted-foreground">Loading...</div>
 									{/if}
 									<div class="text-2xs text-muted-foreground mt-1">
-										{formatBytes(currentStats?.memoryUsage ?? 0)} / {formatBytes(currentStats?.memoryLimit ?? 0)}
+										{formatBytes(currentStats?.memoryUsage ?? 0)} / {currentStats?.memoryLimit ? formatBytes(currentStats.memoryLimit) : 'unlimited'}
 									</div>
 								</div>
 								<!-- Network I/O -->
@@ -1011,6 +1045,31 @@
 							<h3 class="text-sm font-semibold">Image</h3>
 							<div class="flex items-center gap-2 p-2 bg-muted rounded">
 								<code class="text-xs break-all flex-1">{containerData.Config?.Image || 'N/A'}</code>
+								{#if hasImageUpdate}
+									{#if onUpdate}
+										<ConfirmPopover
+											open={confirmUpdateImageOpen}
+											action="Update"
+											itemType="container"
+											itemName={displayName || containerId.slice(0, 12)}
+											title="Update available - click to update"
+											onConfirm={doUpdate}
+											onOpenChange={(o) => confirmUpdateImageOpen = o}
+										>
+											{#snippet children({ open })}
+												<span class="flex items-center gap-1 text-xs text-amber-500 {open ? '' : 'hover:text-amber-400'} transition-colors shrink-0">
+													<CircleArrowUp class="w-3.5 h-3.5 {$appSettings.highlightUpdates ? 'glow-amber' : ''}" />
+													Update available
+												</span>
+											{/snippet}
+										</ConfirmPopover>
+									{:else}
+										<span title="A newer image is available" class="flex items-center gap-1 text-xs text-amber-500 shrink-0">
+											<CircleArrowUp class="w-3.5 h-3.5 {$appSettings.highlightUpdates ? 'glow-amber' : ''}" />
+											Update available
+										</span>
+									{/if}
+								{/if}
 							</div>
 						</div>
 
@@ -1388,6 +1447,7 @@
 							<FileBrowserPanel
 								containerId={containerId}
 								envId={$currentEnvironment?.id ?? undefined}
+								initialPath={fileBrowserStartPath(containerData.Config?.WorkingDir)}
 							/>
 						{:else if containerData.State?.Paused}
 							<div class="flex items-center gap-2 text-sm text-muted-foreground py-8 justify-center">
@@ -1831,6 +1891,17 @@
 							</div>
 						{:else}
 							<p class="text-sm text-muted-foreground">No health check configured</p>
+						{/if}
+					</Tabs.Content>
+
+					<!-- Compose Tab (last) -->
+					<Tabs.Content value="compose" class="flex-1 min-h-0">
+						{#if activeTab === 'compose'}
+							<ContainerComposeTab
+								{containerId}
+								containerName={containerName || containerId.slice(0, 12)}
+								envId={$currentEnvironment?.id ?? null}
+							/>
 						{/if}
 					</Tabs.Content>
 				</Tabs.Root>

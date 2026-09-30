@@ -321,6 +321,7 @@ export const gitStacks = sqliteTable('git_stacks', {
 	stackName: text('stack_name').notNull(),
 	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
 	repositoryId: integer('repository_id').notNull().references(() => gitRepositories.id, { onDelete: 'cascade' }),
+	branch: text('branch'), // Per-stack branch override; null = use repository default
 	composePath: text('compose_path').default('docker-compose.yml'), // Reverted to original value (#1110)
 	envFilePath: text('env_file_path'), // Path to .env file in repository (e.g., ".env", "config/.env.prod")
 	autoUpdate: integer('auto_update', { mode: 'boolean' }).default(false),
@@ -357,10 +358,67 @@ export const stackSources = sqliteTable('stack_sources', {
 	// Names (no values) of secret keys injected from the bound provider on the last
 	// deploy, so container inspect can mask them without a live provider call.
 	injectedSecretKeys: text('injected_secret_keys'),
+	// Per-stack icon: a lucide name ('server'), 'selfhst:<ref>', or 'custom:<file>'.
+	// Null -> UI falls back to a generic icon.
+	icon: text('icon'),
 	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`),
 	updatedAt: text('updated_at').default(sql`CURRENT_TIMESTAMP`)
 }, (table) => ({
 	stackSourceEnvUnique: unique().on(table.stackName, table.environmentId)
+}));
+
+// Per-container icon override. Containers are ephemeral Docker objects (no DB row of
+// their own), so the override is keyed by (containerName, environmentId) - the name is
+// stable across recreation (auto-update, compose up), unlike the container id. Absent
+// row -> the UI's automatic image/name icon matching applies.
+export const containerIconOverrides = sqliteTable('container_icon_overrides', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	containerName: text('container_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	// A lucide name ('server'), 'selfhst:<ref>', or 'custom:<file>'. Same shape as stack icons.
+	icon: text('icon').notNull(),
+	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`),
+	updatedAt: text('updated_at').default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	containerIconEnvUnique: unique().on(table.containerName, table.environmentId)
+}));
+
+// User-defined organizational tags for containers and stacks.
+// Distinct from Docker labels. The catalog below is GLOBAL (one 'prod'/'infra'/etc
+// across the whole instance, unique on name). Assignments (container_tags/stack_tags)
+// ARE env-scoped and keyed by the container/stack NAME (stable across recreation), so
+// which containers/stacks carry a tag is decided per environment.
+export const tags = sqliteTable('tags', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	name: text('name').notNull(),
+	color: text('color').notNull().default('slate'), // one of the fixed palette (tags-core.ts)
+	icon: text('icon'),                              // optional lucide icon name; null = default tag icon
+	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	// Unique on name. The migration makes the index case-INSENSITIVE (COLLATE NOCASE
+	// on sqlite, lower(name) on pg) so "Prod" and "prod" are the same tag even under
+	// a concurrent create; drizzle's DSL can't express that, so it lives in 0016.
+	tagNameUnique: unique().on(table.name)
+}));
+
+export const containerTags = sqliteTable('container_tags', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	containerName: text('container_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	tagId: integer('tag_id').notNull().references(() => tags.id, { onDelete: 'cascade' }),
+	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	containerTagUnique: unique().on(table.containerName, table.environmentId, table.tagId)
+}));
+
+export const stackTags = sqliteTable('stack_tags', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	stackName: text('stack_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	tagId: integer('tag_id').notNull().references(() => tags.id, { onDelete: 'cascade' }),
+	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	stackTagUnique: unique().on(table.stackName, table.environmentId, table.tagId)
 }));
 
 export const stackEnvironmentVariables = sqliteTable('stack_environment_variables', {
@@ -468,7 +526,9 @@ export const scheduleExecutions = sqliteTable('schedule_executions', {
 	logs: text('logs'), // Execution logs/output
 	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
 }, (table) => ({
-	typeIdIdx: index('schedule_executions_type_id_idx').on(table.scheduleType, table.scheduleId)
+	typeIdIdx: index('schedule_executions_type_id_idx').on(table.scheduleType, table.scheduleId),
+	// Powers "runs for this stack/container" lookups without a full table scan.
+	entityEnvIdx: index('schedule_executions_entity_env_idx').on(table.entityName, table.environmentId)
 }));
 
 // =============================================================================
@@ -505,6 +565,8 @@ export const backupDestinations = sqliteTable('backup_destinations', {
 	envVars: text('env_vars'),                       // JSON: { key: value } — values encrypted
 	flags: text('flags'),                            // extra restic CLI flags
 	hostPath: text('host_path'),                     // bind-mount source for local repos
+	cacert: text('cacert'),                          // AES-256-GCM encrypted PEM: self-signed CA for a TLS backend (RESTIC_CACERT)
+	tlsClientCert: text('tls_client_cert'),          // AES-256-GCM encrypted PEM: client cert+key for mTLS (RESTIC_TLS_CLIENT_CERT)
 	policies: text('policies'),                      // JSON: { pruneSchedule, checkSchedule, autoUnlock, maxUnused }
 	lastTestAt: text('last_test_at'),
 	lastTestStatus: text('last_test_status'),        // 'success' | 'failed'

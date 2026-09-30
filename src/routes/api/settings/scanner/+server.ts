@@ -92,7 +92,7 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 /**
  * @openapi
  * summary: Save the vulnerability-scanner settings for an environment
- * body: {scanner:string, grypeArgs:string, trivyArgs:string, envId:integer}
+ * body: {scanner:string, grypeArgs:string, trivyArgs:string, envId:integer, grypeImage:string, trivyImage:string}
  * body-example: {"scanner":"grype","grypeArgs":"-o json -v {image}","trivyArgs":"image --format json {image}","envId":1}
  * resp-200: {success:boolean!, settings:{scanner:string!, grypeArgs:string!, trivyArgs:string!}}
  * resp-400: Invalid scanner type (must be none, grype, trivy or both)

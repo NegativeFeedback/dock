@@ -26,6 +26,8 @@ import { prefersJSON, sseToJSON } from '$lib/server/sse';
 import type { EnvironmentStats } from '../+server';
 import { parseLabels } from '$lib/utils/label-colors';
 import { isEdgeConnected } from '$lib/server/hawser';
+import { getImageDiskUsageTotalSize } from '$lib/server/docker-disk-usage-core';
+import { calculateCpuPercent, calculateMemoryUsage, calculateMemoryLimit } from '$lib/server/stats-calc-core';
 
 
 // Skip disk usage collection (Synology NAS performance fix)
@@ -102,38 +104,6 @@ async function getCachedDiskUsage(envId: number): Promise<any> {
 const TOP_CONTAINERS_LIMIT = 8;
 
 // Calculate CPU percentage from Docker stats (same logic as container stats endpoint)
-function calculateCpuPercent(stats: any): number {
-	const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - stats.precpu_stats.cpu_usage.total_usage;
-	const systemDelta = stats.cpu_stats.system_cpu_usage - stats.precpu_stats.system_cpu_usage;
-	const cpuCount = stats.cpu_stats.online_cpus || stats.cpu_stats.cpu_usage.percpu_usage?.length || 1;
-
-	if (systemDelta > 0 && cpuDelta > 0) {
-		return (cpuDelta / systemDelta) * cpuCount * 100;
-	}
-	return 0;
-}
-
-/**
- * Calculate memory usage the same way Docker CLI does.
- * Docker subtracts cache (inactive_file) from total usage to show actual memory consumption.
- * - cgroup v2: subtract inactive_file from stats
- * - cgroup v1: subtract total_inactive_file from stats
- * See: https://docs.docker.com/engine/containers/runmetrics/
- */
-function calculateMemoryUsage(memoryStats: any): number {
-	const usage = memoryStats?.usage || 0;
-	const stats = memoryStats?.stats || {};
-
-	// cgroup v2 uses 'inactive_file', cgroup v1 uses 'total_inactive_file'
-	const cache = stats.inactive_file ?? stats.total_inactive_file ?? 0;
-
-	// Only subtract cache if it's less than usage (sanity check)
-	if (cache > 0 && cache < usage) {
-		return usage - cache;
-	}
-
-	return usage;
-}
 
 // Target time window for metrics history charts (15 minutes)
 const METRICS_HISTORY_WINDOW_MS = 15 * 60 * 1000;
@@ -434,9 +404,11 @@ async function getEnvironmentStatsProgressive(
 			: getCachedDiskUsage(env.id)
 				.then((diskUsage) => {
 					if (diskUsage) {
-						// Update images with disk usage data (more accurate)
+						// Update images with Docker's deduplicated aggregate size
 						envStats.images.total = diskUsage.Images?.length || envStats.images.total;
-						envStats.images.totalSize = diskUsage.Images?.reduce((sum: number, img: any) => sum + getValidSize(img.Size), 0) || envStats.images.totalSize;
+						envStats.images.totalSize = getImageDiskUsageTotalSize(diskUsage)
+							?? diskUsage.Images?.reduce((sum: number, img: any) => sum + getValidSize(img.Size), 0)
+							?? envStats.images.totalSize;
 
 						// Volumes from disk usage
 						envStats.volumes.total = diskUsage.Volumes?.length || 0;
@@ -485,9 +457,9 @@ async function getEnvironmentStatsProgressive(
 					if (!stats) return null;
 
 					const cpuPercent = calculateCpuPercent(stats);
-					const memoryUsage = calculateMemoryUsage(stats.memory_stats);
-					const memoryLimit = stats.memory_stats?.limit || 1;
-					const memoryPercent = (memoryUsage / memoryLimit) * 100;
+					const memoryUsage = calculateMemoryUsage(stats.memory_stats).usage;
+					const memoryLimit = calculateMemoryLimit(stats);
+					const memoryPercent = memoryLimit > 0 ? (memoryUsage / memoryLimit) * 100 : 0;
 
 					return {
 						name: container.name,
@@ -508,7 +480,7 @@ async function getEnvironmentStatsProgressive(
 
 			onPartialUpdate({
 				id: env.id,
-				topContainers: [...envStats.topContainers],
+				topContainers: [...envStats.topContainers!],
 				loading: { ...envStats.loading! }
 			});
 

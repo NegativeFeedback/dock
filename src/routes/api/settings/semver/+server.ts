@@ -7,9 +7,16 @@ import { authorize } from '$lib/server/authorize';
  * summary: Get the global newer-version-tag (semver) detection config
  * resp-200: {enabled:boolean!, maxBump:string!, matchFlavor:boolean!, includePrerelease:boolean!}
  * resp-200-example: {"enabled":true,"maxBump":"minor","matchFlavor":true,"includePrerelease":false}
+ * resp-403: Permission denied (needs settings:view)
  */
 export const GET: RequestHandler = async ({ cookies }) => {
-	await authorize(cookies);
+	// Describes how this installation is operated, and the settings screen is its only
+	// reader - the update check and the scheduler read the config straight from the
+	// database, so gating here costs nothing elsewhere.
+	const auth = await authorize(cookies);
+	if (auth.authEnabled && !await auth.can('settings', 'view')) {
+		return json({ error: 'Permission denied' }, { status: 403 });
+	}
 	return json(await getGlobalSemverConfig());
 };
 

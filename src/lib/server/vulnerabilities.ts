@@ -5,7 +5,7 @@
  *
  * Used by both GET /api/vulnerabilities (grid) and GET /api/vulnerabilities/export.
  */
-import { getAllLatestScans } from '$lib/server/db';
+import { getAllLatestScans } from '$lib/server/scan-queries';
 import { listImages, listContainers, DockerConnectionError, EnvironmentNotFoundError } from '$lib/server/docker';
 import { flattenScansToFindings, filterFindings, sortFindings } from '$lib/utils/vulnerability';
 import type { Finding, FindingContainer, VulnerabilitySummary, ScanRow, FindingFilter, SortField } from '$lib/utils/vulnerability';

@@ -14,7 +14,7 @@
  * Two resolution modes:
  *   - Bulk pull: `item list --vault-name <selector> --output json --show-secrets`,
  *     mapping each item to one env var (title -> primary secret).
- *   - Inline references: `pass://SHARE_ID/ITEM_ID[/FIELD]`, resolved one field at
+ *   - Inline references: `pass://VAULT/ITEM/FIELD` (id or name), resolved one field at
  *     a time via `item view <uri> --output json`.
  *
  * The access token is passed via the PROTON_PASS_PERSONAL_ACCESS_TOKEN
@@ -27,7 +27,9 @@ import { spawn } from 'node:child_process';
 import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { KeyedSerializer, QueueTimeoutError } from '../keyed-serializer';
 import type { ProtonConfig, SecretProvider, TestConnectionResult } from './shared';
+import { stripSurroundingQuotes } from './shared';
 
 const DEFAULT_PASS_CLI_PATH = '/usr/local/bin/pass-cli';
 const LOGIN_TIMEOUT_MS = 30_000;
@@ -39,11 +41,14 @@ const VIEW_OUTPUT_LIMIT = 1 * 1024 * 1024;
 const LOGIN_OUTPUT_LIMIT = 64 * 1024;
 const STDERR_OUTPUT_LIMIT = 64 * 1024;
 
-// pass://SHARE_ID/ITEM_ID/FIELD. Share/item ids are opaque base64url-ish tokens
-// (Proton uses url-safe base64 with '=' padding). The FIELD segment is required:
-// with a field, `item view` prints the bare field value, which is unambiguous;
-// without one it would print the whole item and there is no single "the secret".
-const PASS_REF_RE = /^pass:\/\/[A-Za-z0-9_=-]+\/[A-Za-z0-9_=-]+\/[^/\s]+$/;
+// pass://VAULT/ITEM/FIELD. VAULT and ITEM may be an opaque share/item id OR a
+// human-readable name (pass-cli resolves names to ids itself); names can contain
+// spaces, so those two segments allow any char except a path separator or a control
+// char (newline/tab). The FIELD segment is required and kept tight (no spaces): with
+// a field, `item view` prints the bare field value, which is unambiguous; without one
+// it would print the whole item and there is no single "the secret". The ref is passed
+// to pass-cli as a single argv element (spawn shell:false), so a space is safe.
+const PASS_REF_RE = /^pass:\/\/[^/\n\r\t]+\/[^/\n\r\t]+\/[^/\s]+$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
@@ -87,7 +92,12 @@ function childEnvironment(sessionDir: string, accessToken?: string): NodeJS.Proc
 		HOME: sessionDir,
 		XDG_CONFIG_HOME: sessionDir,
 		PROTON_PASS_SESSION_DIR: sessionDir,
-		PROTON_PASS_NO_UPDATE_CHECK: '1'
+		PROTON_PASS_NO_UPDATE_CHECK: '1',
+		// Dockhand runs headless in a container with no system keyring / D-Bus, where
+		// pass-cli's default key provider fails with NoStorageAccess before any auth.
+		// The filesystem provider stores the key under our isolated sessionDir instead.
+		// An operator with a real keyring can override via the container env (#1440).
+		PROTON_PASS_KEY_PROVIDER: process.env.PROTON_PASS_KEY_PROVIDER?.trim() || 'fs'
 	};
 	for (const key of CHILD_ENV_ALLOWLIST) {
 		const value = process.env[key];
@@ -178,6 +188,19 @@ async function executePassCli(
 				reject(failure ?? spawnFailure(error));
 			});
 
+			// A killed process can leave `close` pending indefinitely: the shell dies
+			// but a grandchild inherits the pipes and holds them open. Once the child
+			// itself is gone and we have already decided this call failed, there is no
+			// output left to wait for, so settle on `exit` instead of blocking the
+			// caller (and everything queued behind it) on those streams.
+			child.once('exit', () => {
+				if (settled || !failure) return;
+				settled = true;
+				clearTimeout(timeout);
+				if (killTimer) clearTimeout(killTimer);
+				reject(failure);
+			});
+
 			child.once('close', (code) => {
 				if (settled) return;
 				settled = true;
@@ -200,11 +223,49 @@ async function executePassCli(
 }
 
 /**
+ * Sessions run one at a time per pass-cli binary. The session directory is
+ * private per call, but pass-cli keeps one session per user underneath, so a
+ * second `login` blocks on the first: the stack editor's live probe and a deploy
+ * would otherwise race and one of them would spend its whole login timeout
+ * waiting. Keyed on the executable so two configured Proton providers, which
+ * share that binary, queue together.
+ */
+const sessions = new KeyedSerializer();
+
+/**
+ * How long a caller waits for the binary before giving up.
+ *
+ * Derived from the pass-cli timeouts rather than picked, so it cannot drift
+ * below them: a session ahead of us is a login, its per-reference lookups and a
+ * logout, each already individually bounded, so it always ends on its own. The
+ * lookup allowance is generous because a reference-heavy stack legitimately
+ * holds the binary for a while, and waiting is what keeps that deploy working.
+ * A caller that exceeds even this is behind something wedged, not something slow.
+ */
+const SESSION_QUEUE_TIMEOUT_MS = LOGIN_TIMEOUT_MS + 20 * COMMAND_TIMEOUT_MS + LOGOUT_TIMEOUT_MS;
+
+/**
  * Runs `fn` inside a fresh, private pass-cli session: login, then the callback,
  * then an unconditional logout, then the session dir is removed. The PAT never
  * survives the call.
  */
 async function withSession<T>(
+	token: string,
+	fn: (session: string) => Promise<T>
+): Promise<T> {
+	try {
+		return await sessions.run(executablePath(), () => runSession(token, fn), SESSION_QUEUE_TIMEOUT_MS);
+	} catch (error: unknown) {
+		if (error instanceof QueueTimeoutError) {
+			throw new PassCliError(
+				'Proton Pass is busy: another vault operation is still using pass-cli'
+			);
+		}
+		throw error;
+	}
+}
+
+async function runSession<T>(
 	token: string,
 	fn: (session: string) => Promise<T>
 ): Promise<T> {
@@ -262,7 +323,7 @@ function vaultName(selector: string): string {
 function passReference(value: string): string {
 	const ref = value.trim();
 	if (!PASS_REF_RE.test(ref)) {
-		throw new PassCliError('Proton Pass reference must be pass://SHARE_ID/ITEM_ID[/FIELD]');
+		throw new PassCliError('Proton Pass reference must be pass://VAULT/ITEM/FIELD (id or name)');
 	}
 	return ref;
 }
@@ -360,7 +421,7 @@ export const protonProvider: SecretProvider<ProtonConfig> = {
 	supportsBulk: true,
 
 	isReference(value: unknown): value is string {
-		return typeof value === 'string' && value.trim().startsWith('pass://');
+		return typeof value === 'string' && stripSurroundingQuotes(value).startsWith('pass://');
 	},
 
 	async testConnection(config: ProtonConfig): Promise<TestConnectionResult> {

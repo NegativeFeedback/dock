@@ -15,7 +15,8 @@ import {
 	createScheduleExecution,
 	updateScheduleExecution,
 	appendScheduleExecutionLog,
-	saveVulnerabilityScan
+	saveVulnerabilityScan,
+	removePendingContainerUpdateByName
 } from '../../db';
 import {
 	pullImage,
@@ -589,6 +590,14 @@ export async function runContainerUpdate(
 
 		if (result.success) {
 			await updateAutoUpdateLastUpdated(containerName, envId);
+			// The container now runs the new image, so its pending row is spent. Left
+			// behind it keeps the container in the "updates available" list holding an id
+			// the recreate has already replaced, and the next batch update fails on it.
+			if (envId != null) {
+				await removePendingContainerUpdateByName(envId, containerName).catch((e) =>
+					log(`Could not clear the pending update row: ${e?.message ?? e}`)
+				);
+			}
 			log(`Successfully updated container: ${containerName}`);
 
 			await updateScheduleExecution(execution.id, {

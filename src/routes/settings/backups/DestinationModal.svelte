@@ -18,6 +18,7 @@
 	import { FieldLabel } from '$lib/components/ui/field-label';
 	import { toast } from 'svelte-sonner';
 	import { focusFirstInput } from '$lib/utils';
+	import { backendSupportsTls } from '$lib/shared/repo-predicates';
 
 	interface Destination {
 		id: number;
@@ -25,6 +26,8 @@
 		repository: string;
 		hostPath?: string | null;
 		envVars?: Record<string, string>;
+		hasCacert?: boolean;         // a CA cert is stored (the PEM itself is never sent back)
+		hasTlsClientCert?: boolean;  // a client cert is stored
 		flags?: string;
 		backupFlags?: string;   // split from the GET endpoint (legacy strings surface here)
 		restoreFlags?: string;
@@ -54,7 +57,8 @@
 		loadingStats = true;
 		try {
 			const res = await fetch(`/api/backup/destinations/${destination.id}/task`, {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				// Accept: json runs the read synchronously so we get {success, stats}, not {jobId}.
+				method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
 				body: JSON.stringify({ task: 'stats' })
 			});
 			const data = await res.json();
@@ -93,7 +97,7 @@
 		{
 			value: 'local', label: 'Local path', icon: HardDrive,
 			fields: [
-				{ key: 'path', label: 'Path', placeholder: '/mnt/backups/dockhand', optional: true }
+				{ key: 'path', label: 'Path', placeholder: '/app/local-backups/myrepo', optional: true }
 			],
 			buildRepo: (f) => f.path || '',
 			parseRepo: (repo) => ({ path: repo })
@@ -207,6 +211,29 @@
 		}
 		input.value = ''; // let the same file be re-picked
 	}
+
+	// TLS certs (PEM). Sent as content to the server, which stores them encrypted and
+	// NEVER sends the PEM back (only hasCacert/hasTlsClientCert booleans). So on edit
+	// these start blank = "keep the stored cert"; an explicit clear zeroes them out.
+	let formCacert = $state('');
+	let formTlsClientCert = $state('');
+	let hadCacert = $state(false);        // a cert was already stored when the modal opened
+	let hadTlsClientCert = $state(false);
+	let caFileInput = $state<HTMLInputElement | null>(null);
+	let clientCertFileInput = $state<HTMLInputElement | null>(null);
+
+	async function uploadPem(which: 'ca' | 'client', e: Event) {
+		const input = e.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+		try {
+			const text = await file.text();
+			if (which === 'ca') formCacert = text; else formTlsClientCert = text;
+		} catch {
+			toast.error('Could not read the selected file');
+		}
+		input.value = '';
+	}
 	let formPassword = $state('');
 	let formBackupFlags = $state('');
 	let formRestoreFlags = $state('');
@@ -239,6 +266,12 @@
 	const selectedBackend = $derived(backendTypes.find(b => b.value === formBackendType) ?? backendTypes[0]);
 	const repoFields = $derived(selectedBackend.fields.filter(f => !f.envKey));
 	const credentialFields = $derived(selectedBackend.fields.filter(f => f.envKey));
+
+	// TLS certs only apply to backends self-hostable over HTTPS with a private CA
+	// (S3/REST); hidden for local/B2/Azure/Google Cloud. See backendSupportsTls.
+	const showTlsSection = $derived(
+		backendSupportsTls(formBackendType, { isEditing, hasStoredCert: hadCacert || hadTlsClientCert })
+	);
 
 	// A field is mandatory unless it opts out (optional) or is a toggle (skipHostKey).
 	function fieldRequired(f: FormField): boolean {
@@ -282,6 +315,7 @@
 	function resetForm() {
 		formName = ''; formBackendType = 'local'; formFields = {}; formPassword = '';
 		formBackupFlags = ''; formRestoreFlags = ''; formError = '';
+		formCacert = ''; formTlsClientCert = ''; hadCacert = false; hadTlsClientCert = false;
 		formSaving = false;
 		policyPruneEnabled = true; policyPruneSchedule = '0 0 1 * *'; policyPruneMaxUnused = '10';
 		policyCheckEnabled = true; policyCheckSchedule = '0 0 1 * *';
@@ -316,6 +350,11 @@
 				// (legacy bare strings surface as backupFlags), so the form binds them directly.
 				formBackupFlags = destination.backupFlags ?? '';
 				formRestoreFlags = destination.restoreFlags ?? '';
+				// PEMs are never returned; start blank and remember one is stored so the
+				// UI can say "leave blank to keep" and offer a Clear button.
+				formCacert = ''; formTlsClientCert = '';
+				hadCacert = !!destination.hasCacert;
+				hadTlsClientCert = !!destination.hasTlsClientCert;
 				formError = '';
 				// Load policies
 				const pol = destination.policies ? (() => { try { return JSON.parse(destination.policies); } catch { return {}; } })() : {};
@@ -355,10 +394,14 @@
 		setTimeout(() => { generatedOk = false; }, 1500);
 	}
 
-	function copyPassword() {
-		copyToClipboard(formPassword);
-		copiedOk = true;
-		setTimeout(() => { copiedOk = false; }, 1500);
+	async function copyPassword() {
+		const ok = await copyToClipboard(formPassword);
+		if (ok) {
+			copiedOk = true;
+			setTimeout(() => { copiedOk = false; }, 1500);
+		} else {
+			toast.error('Could not copy to clipboard. Copy it manually, or use HTTPS to enable one-click copy.');
+		}
 	}
 
 	function handleBackendChange(value: string) {
@@ -380,7 +423,13 @@
 				// instance role) that hangs on a retry loop instead of failing fast.
 				const repository = selectedBackend.buildRepo(formFields);
 				const envVars = collectEnvVars();
-				payload = { repository, password: formPassword, envVars: Object.keys(envVars).length > 0 ? envVars : undefined };
+				payload = {
+					repository, password: formPassword,
+					envVars: Object.keys(envVars).length > 0 ? envVars : undefined,
+					// Carry the TLS PEMs so a pre-save test of a private-CA backend can validate.
+					cacert: formCacert.trim() || undefined,
+					tlsClientCert: formTlsClientCert.trim() || undefined
+				};
 			}
 			const res = await fetch('/api/backup/destinations/test', {
 				method: 'POST',
@@ -486,6 +535,15 @@
 				policies: JSON.stringify(policies)
 			};
 			if (formPassword || !isEditing) body.password = formPassword || undefined;
+			// TLS certs, with keep/clear semantics on edit:
+			//   typed value  -> send it (set/replace)
+			//   blank + one stored -> omit (server keeps the existing cert)
+			//   explicitly cleared (blank + none was stored, or user hit Clear) -> send ''
+			// On create, blank just means "no cert" so an empty string is fine to omit.
+			if (formCacert.trim()) body.cacert = formCacert;
+			else if (isEditing && !hadCacert) body.cacert = '';
+			if (formTlsClientCert.trim()) body.tlsClientCert = formTlsClientCert;
+			else if (isEditing && !hadTlsClientCert) body.tlsClientCert = '';
 			const res = await fetch(isEditing ? `/api/backup/destinations/${destination!.id}` : '/api/backup/destinations', {
 				method: isEditing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
 			});
@@ -511,7 +569,7 @@
 		{#if selectedBackend.value === 'local'}
 			<div class="flex items-start gap-2 p-2.5 mt-4 rounded-md bg-amber-500/10 border border-amber-500/20 text-xs text-amber-600 dark:text-amber-400">
 				<HardDrive class="w-3.5 h-3.5 shrink-0 mt-0.5" />
-				<span>Local path repositories work on the local Docker host, or a co-located socket-proxy on that same host. For remote hosts, use S3, REST, or another remote backend.</span>
+				<span>Enter the path as Dockhand sees it inside its own container (the container side of your backup volume mount, e.g. <code>/app/local-backups/...</code>), not the host path. Local path repositories work on the local Docker host, or a co-located socket-proxy on that same host. For remote hosts, use S3, REST, or another remote backend.</span>
 			</div>
 		{/if}
 		<div class="grid grid-cols-2 gap-6 py-4">
@@ -680,6 +738,65 @@
 				</div>
 			</div>
 		</div>
+
+		<!-- TLS certificates: only for backends that can be self-hosted over HTTPS with a
+		     private CA - S3 (MinIO/Ceph) and a REST server. A local path has no network, and
+		     B2/Azure/Google Cloud are managed clouds with public CAs, so the section is hidden
+		     there. Optional; blank = use the system trust store. PEM content, uploaded or pasted. -->
+		{#if showTlsSection}
+		<div class="border-t pt-3 mt-2 space-y-3">
+			<span class="text-xs font-medium text-muted-foreground uppercase tracking-wide">TLS certificates (optional)</span>
+			<p class="text-xs text-muted-foreground -mt-1">
+				For a backend served over HTTPS with a private/self-signed CA. Leave blank to use the system trust store.
+			</p>
+			<div class="grid grid-cols-2 gap-6">
+				<div class="space-y-1">
+					<div class="flex items-center justify-between">
+						<Label for="dest-cacert">CA certificate</Label>
+						<div class="flex gap-1">
+							{#if isEditing && hadCacert && !formCacert}
+								<Button variant="outline" size="sm" class="h-7 px-2 text-xs text-destructive" onclick={() => { hadCacert = false; }}>Clear</Button>
+							{/if}
+							<Button variant="outline" size="sm" class="h-7 px-2 text-xs" onclick={() => caFileInput?.click()}>
+								<Upload class="mr-1 h-3 w-3" />Upload
+							</Button>
+						</div>
+					</div>
+					<input type="file" accept=".pem,.crt,.cer,.ca,application/x-pem-file,text/plain" class="hidden" bind:this={caFileInput} onchange={(e) => uploadPem('ca', e)} />
+					<Textarea
+						id="dest-cacert"
+						rows={4}
+						bind:value={formCacert}
+						placeholder={isEditing && hadCacert ? '(a CA certificate is stored - leave blank to keep it)' : '-----BEGIN CERTIFICATE-----'}
+						class="field-sizing-fixed max-h-40 resize-y overflow-auto font-mono text-xs"
+					/>
+					<p class="text-xs text-muted-foreground">Verifies the backend's TLS certificate (restic <code class="font-mono">RESTIC_CACERT</code>).</p>
+				</div>
+				<div class="space-y-1">
+					<div class="flex items-center justify-between">
+						<Label for="dest-client-cert">Client certificate (mTLS)</Label>
+						<div class="flex gap-1">
+							{#if isEditing && hadTlsClientCert && !formTlsClientCert}
+								<Button variant="outline" size="sm" class="h-7 px-2 text-xs text-destructive" onclick={() => { hadTlsClientCert = false; }}>Clear</Button>
+							{/if}
+							<Button variant="outline" size="sm" class="h-7 px-2 text-xs" onclick={() => clientCertFileInput?.click()}>
+								<Upload class="mr-1 h-3 w-3" />Upload
+							</Button>
+						</div>
+					</div>
+					<input type="file" accept=".pem,.crt,.cer,.key,application/x-pem-file,text/plain" class="hidden" bind:this={clientCertFileInput} onchange={(e) => uploadPem('client', e)} />
+					<Textarea
+						id="dest-client-cert"
+						rows={4}
+						bind:value={formTlsClientCert}
+						placeholder={isEditing && hadTlsClientCert ? '(a client certificate is stored - leave blank to keep it)' : 'certificate + private key in one PEM'}
+						class="field-sizing-fixed max-h-40 resize-y overflow-auto font-mono text-xs"
+					/>
+					<p class="text-xs text-muted-foreground">Certificate + key in one PEM for mutual TLS (restic <code class="font-mono">RESTIC_TLS_CLIENT_CERT</code>).</p>
+				</div>
+			</div>
+		</div>
+		{/if}
 
 
 		<!-- Policies section -->

@@ -18,6 +18,7 @@ export interface Environment {
 	connectionType?: 'socket' | 'direct' | 'hawser-standard' | 'hawser-edge';
 	publicIp?: string | null;
 	timezone?: string;
+	highlightChanges?: boolean;
 }
 
 const STORAGE_KEY = 'dockhand:environment';

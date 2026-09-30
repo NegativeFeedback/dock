@@ -7,11 +7,13 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
+	import { containerMatchesSearch } from '$lib/utils/container-search-core';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Popover from '$lib/components/ui/popover';
 	import * as Select from '$lib/components/ui/select';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
+	import ContainerIcon from '$lib/components/ContainerIcon.svelte';
 	import { formatPorts, formatExposedPorts } from '$lib/utils/port-format';
 	import { formatBytes, formatBytesCompact } from '$lib/utils/format';
 	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
@@ -21,6 +23,7 @@
 	import { Switch } from '$lib/components/ui/switch';
 	import { Label } from '$lib/components/ui/label';
 	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import {
 		Play,
 		Square,
@@ -37,7 +40,6 @@
 		ArrowUpDown,
 		ArrowUp,
 		ArrowDown,
-		Search,
 		ExternalLink,
 		Globe,
 		LayoutPanelLeft,
@@ -61,12 +63,11 @@
 		Shield,
 		ShieldCheck,
 		Box,
-		Ship,
-		Cable,
 		Copy,
 		Loader2,
 		AlertCircle,
-		Tag
+		Tag,
+		Unplug
 	} from 'lucide-svelte';
 	import { broom } from '@lucide/lab';
 	import { copyToClipboard } from '$lib/utils/clipboard';
@@ -82,15 +83,21 @@
 	import BatchOperationModal from '$lib/components/BatchOperationModal.svelte';
 	import VersionUpdateBadge from '$lib/components/VersionUpdateBadge.svelte';
 	import VersionUpdateModal from '$lib/components/VersionUpdateModal.svelte';
-	import type { ContainerInfo } from '$lib/types';
+	import type { ContainerInfo, TerminalMode } from '$lib/types';
+	import { matchesTagFilter, tagGroupDescriptor, type Tag as UserTag, type TagColor } from '$lib/utils/tags-core';
+	import TagChips from '$lib/components/TagChips.svelte';
+	import TagEditPopover from '$lib/components/TagEditPopover.svelte';
+	import TagFilter from '$lib/components/TagFilter.svelte';
+	import TagLucideIcon from '$lib/components/TagLucideIcon.svelte';
 	import { EmptyState, NoEnvironment } from '$lib/components/ui/empty-state';
 	import { currentEnvironment, environments, appendEnvParam, clearStaleEnvironment } from '$lib/stores/environment';
 	import { containerStore } from '$lib/stores/containers';
 	import { onDockerEvent, isContainerListChange } from '$lib/stores/events';
 	import { appSettings } from '$lib/stores/settings';
-	import { canAccess } from '$lib/stores/auth';
+	import { canAccess, isAdmin } from '$lib/stores/auth';
 	import { vulnerabilityCriteriaIcons } from '$lib/utils/update-steps';
-	import { ipToNumber } from '$lib/utils/ip';
+	import { compareIps } from '$lib/utils/ip';
+	import { parseTimeStringToSeconds } from '$lib/utils/parse-uptime';
 	import { formatHostPortUrl } from '$lib/utils/url';
 	import { parseCustomUrl } from '$lib/utils/custom-url';
 	import { extractTraefikUrls } from '$lib/utils/traefik-urls';
@@ -105,11 +112,141 @@
 	// Track change detection for stat highlighting (UI-only, stays in component)
 	let changedFields = $state<Map<string, Set<string>>>(new Map());
 
-	type SortField = 'name' | 'image' | 'state' | 'health' | 'uptime' | 'stack' | 'ip' | 'cpu' | 'memory' | 'ports';
+	type SortField = 'name' | 'image' | 'state' | 'health' | 'uptime' | 'stack' | 'ip' | 'cpu' | 'memory' | 'ports' | 'diskRead' | 'diskWrite' | 'netRx' | 'netTx';
 	type SortDirection = 'asc' | 'desc';
+
 
 	// Data from persistent store (survives page navigation)
 	const containers = $derived($containerStore.data);
+	// User-set per-container icon overrides for the current env (name -> icon), batch-loaded.
+	let iconOverrides = $state<Record<string, string>>({});
+	async function loadIconOverrides(forEnvId: number | null) {
+		try {
+			const res = await fetch(appendEnvParam('/api/container-icons', forEnvId));
+			iconOverrides = res.ok ? await res.json() : {};
+		} catch {
+			iconOverrides = {};
+		}
+	}
+
+	// User-defined tags: assignments (name -> tagId[]) + the catalog.
+	let tagsMap = $state<Record<string, number[]>>({});
+	let tagCatalog = $state<UserTag[]>([]);
+	const tagById = $derived(new Map(tagCatalog.map((t) => [t.id, t])));
+	async function loadTags(forEnvId: number | null) {
+		try {
+			const res = await fetch(appendEnvParam('/api/container-tags', forEnvId));
+			tagsMap = res.ok ? await res.json() : {};
+		} catch {
+			tagsMap = {};
+		}
+	}
+	async function loadTagCatalog() {
+		// The tag catalog is global (not env-scoped); assignments load per env.
+		try {
+			const res = await fetch('/api/tags');
+			tagCatalog = res.ok ? (await res.json()).tags : [];
+		} catch {
+			tagCatalog = [];
+		}
+		// Drop any persisted filter id that no longer exists in the catalog (a
+		// deleted tag, or a wiped DB) - otherwise a stale id filters the whole
+		// list to empty with no visible cause.
+		const valid = new Set(tagCatalog.map((t) => t.id));
+		if (tagFilter.some((id) => !valid.has(id))) tagFilter = tagFilter.filter((id) => valid.has(id));
+	}
+	// Tag filter, persisted per browser so it survives a refresh.
+	const TAG_FILTER_KEY = 'dockhand-containers-tag-filter';
+	const TAG_FILTER_MODE_KEY = 'dockhand-containers-tag-filter-mode';
+	let tagFilter = $state<number[]>(loadTagFilter());
+	let tagFilterMode = $state<'all' | 'any'>(loadTagFilterMode());
+	function loadTagFilter(): number[] {
+		if (typeof window === 'undefined') return [];
+		try { const s = localStorage.getItem(TAG_FILTER_KEY); return s ? JSON.parse(s) : []; } catch { return []; }
+	}
+	function loadTagFilterMode(): 'all' | 'any' {
+		if (typeof window === 'undefined') return 'any';
+		const s = localStorage.getItem(TAG_FILTER_MODE_KEY);
+		return s === 'all' || s === 'any' ? s : 'any';
+	}
+	$effect(() => {
+		const f = tagFilter, m = tagFilterMode;
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(TAG_FILTER_KEY, JSON.stringify(f));
+		localStorage.setItem(TAG_FILTER_MODE_KEY, m);
+	});
+	function tagsFor(name: string): UserTag[] {
+		return (tagsMap[name] ?? []).map((id) => tagById.get(id)).filter((t): t is UserTag => !!t);
+	}
+
+	// Group-by-tag: partition rows by their unique tag COMBINATION (a container with
+	// prod+infra forms its own group, distinct from just prod). Persisted per browser.
+	const GROUP_BY_TAG_KEY = 'dockhand-containers-group-by-tag';
+	const COLLAPSED_GROUPS_KEY = 'dockhand-containers-collapsed-groups';
+	const SHOW_TAGS_KEY = 'dockhand-containers-show-tags';
+	const SHOW_BANDS_KEY = 'dockhand-containers-group-bands';
+	const INLINE_TAG_EDIT_KEY = 'dockhand-containers-inline-tag-editing';
+	const TAG_SETTINGS_EXPANDED_KEY = 'dockhand-containers-tag-settings-expanded';
+	// Show tag chips on rows (default true - only '0' hides them).
+	let showTags = $state(typeof window === 'undefined' || localStorage.getItem(SHOW_TAGS_KEY) !== '0');
+	// Coloured group bands (default true - only '0' hides them).
+	let showBands = $state(typeof window === 'undefined' || localStorage.getItem(SHOW_BANDS_KEY) !== '0');
+	// Show a tag-edit button on each row (default true - only '0' hides it).
+	let inlineTagEditing = $state(typeof window === 'undefined' || localStorage.getItem(INLINE_TAG_EDIT_KEY) !== '0');
+	// Tag-settings section open/closed (default open - only '0' collapses it).
+	let tagSettingsExpanded = $state(typeof window === 'undefined' || localStorage.getItem(TAG_SETTINGS_EXPANDED_KEY) !== '0');
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(SHOW_TAGS_KEY, showTags ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(SHOW_BANDS_KEY, showBands ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(INLINE_TAG_EDIT_KEY, inlineTagEditing ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(TAG_SETTINGS_EXPANDED_KEY, tagSettingsExpanded ? '1' : '0');
+	});
+	let groupByTag = $state(typeof window !== 'undefined' && localStorage.getItem(GROUP_BY_TAG_KEY) === '1');
+	let collapsedGroups = $state<Set<string>>(loadCollapsedGroups());
+	function loadCollapsedGroups(): Set<string> {
+		if (typeof window === 'undefined') return new Set();
+		try { const s = localStorage.getItem(COLLAPSED_GROUPS_KEY); return new Set(s ? JSON.parse(s) : []); } catch { return new Set(); }
+	}
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(GROUP_BY_TAG_KEY, groupByTag ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...collapsedGroups]));
+	});
+	const containerGroupBy = $derived(groupByTag ? (c: any) => tagGroupDescriptor(tagsFor(c.name)) : undefined);
+	async function createTag(name: string, color: TagColor, icon: string | null): Promise<UserTag | null> {
+		try {
+			const res = await fetch('/api/tags', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name, color, icon })
+			});
+			if (!res.ok) return null;
+			const tag = await res.json();
+			await loadTagCatalog();
+			return tag;
+		} catch { return null; }
+	}
+	async function applyContainerTags(name: string, tagIds: number[]) {
+		tagsMap = { ...tagsMap, [name]: tagIds };
+		try {
+			await fetch(appendEnvParam(`/api/container-tags/${encodeURIComponent(name)}`, envId), {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ tagIds })
+			});
+		} catch { /* optimistic; reload on next env switch */ }
+	}
 	const containerStats = $derived($containerStore.stats);
 	const autoUpdateSettings = $derived($containerStore.autoUpdateSettings);
 	const envHasScanning = $derived($containerStore.envHasScanning);
@@ -215,11 +352,17 @@
 			}
 			// Refresh data (store handles loading state internally)
 			containerStore.refresh(newEnvId);
+			loadIconOverrides(newEnvId);
+			loadTags(newEnvId);
+			loadTagCatalog(); // global catalog; assignments come from loadTags
 		} else if (!env) {
 			// No environment - clear data and stop loading
 			envId = null;
 			shellDetectionCache = {};
 			containerStore.clear();
+			iconOverrides = {};
+			tagsMap = {};
+			tagCatalog = [];
 		}
 	});
 	let showCreateModal = $state(false);
@@ -235,6 +378,7 @@
 	let showFileBrowserModal = $state(false);
 	let fileBrowserContainerId = $state('');
 	let fileBrowserContainerName = $state('');
+	let fileBrowserContainerImage = $state('');
 
 	// Terminal state - track active terminals per container
 	interface ActiveTerminal {
@@ -242,10 +386,12 @@
 		containerName: string;
 		shell: string;
 		user: string;
+		mode: TerminalMode;
 	}
 	let activeTerminals = $state<ActiveTerminal[]>([]);
 	let currentTerminalContainerId = $state<string | null>(null);
 	let terminalPopoverStates = $state<Record<string, boolean>>({});
+	let terminalMode = $state<TerminalMode>('exec');
 	let terminalShell = $state('/bin/bash');
 	let terminalUser = $state('root');
 	let terminalCustomUser = $state('');
@@ -271,6 +417,9 @@
 	// Update confirmation
 	let confirmUpdateAll = $state(false);
 	let confirmUpdateId = $state<string | null>(null);
+	// Separate open-state for the update icon in the image column so it does not
+	// share a popover with the identical icon in the actions column (#1435).
+	let confirmImageUpdateId = $state<string | null>(null);
 	let confirmUpdateSelected = $state(false);
 
 	// Update check state
@@ -781,14 +930,15 @@
 			result = result.filter((c) => newerVersionsMap.has(c.id));
 		}
 
-		// Filter by search query
+		// Filter by search query (name, image, any label key/value, or a
+		// `label:key`/`label:key=value` filter - see containerMatchesSearch).
 		if (searchQuery.trim()) {
-			const query = searchQuery.toLowerCase();
-			result = result.filter(c =>
-				c.name.toLowerCase().includes(query) ||
-				c.image.toLowerCase().includes(query) ||
-				(c.labels?.['com.docker.compose.project'] || '').toLowerCase().includes(query)
-			);
+			result = result.filter(c => containerMatchesSearch(c, searchQuery));
+		}
+
+		// Filter by user-defined tags.
+		if (tagFilter.length > 0) {
+			result = result.filter((c) => matchesTagFilter(tagsMap[c.name], tagFilter, tagFilterMode));
 		}
 
 		// Sort
@@ -833,7 +983,7 @@
 				case 'ip':
 					const ipA = getContainerIp(a.networks);
 					const ipB = getContainerIp(b.networks);
-					cmp = ipToNumber(ipA) - ipToNumber(ipB);
+					cmp = compareIps(ipA, ipB);
 					break;
 				case 'cpu':
 					const cpuA = containerStats.get(a.id)?.cpuPercent ?? -1;
@@ -844,6 +994,18 @@
 					const memA = containerStats.get(a.id)?.memoryUsage ?? -1;
 					const memB = containerStats.get(b.id)?.memoryUsage ?? -1;
 					cmp = memA - memB;
+					break;
+				case 'diskRead':
+					cmp = (containerStats.get(a.id)?.blockRead ?? -1) - (containerStats.get(b.id)?.blockRead ?? -1);
+					break;
+				case 'diskWrite':
+					cmp = (containerStats.get(a.id)?.blockWrite ?? -1) - (containerStats.get(b.id)?.blockWrite ?? -1);
+					break;
+				case 'netRx':
+					cmp = (containerStats.get(a.id)?.networkRx ?? -1) - (containerStats.get(b.id)?.networkRx ?? -1);
+					break;
+				case 'netTx':
+					cmp = (containerStats.get(a.id)?.networkTx ?? -1) - (containerStats.get(b.id)?.networkTx ?? -1);
 					break;
 			}
 			// Secondary sort by name for stability when primary values are equal
@@ -882,8 +1044,12 @@
 		return containerStore.refreshContainers(envId);
 	}
 
-	// Check if highlightChanges is enabled for current environment
-	const highlightChangesEnabled = $derived($currentEnvironment?.highlightChanges ?? true);
+	// Check if highlightChanges is enabled for current environment. Read from the full
+	// environments list first (authoritative); the thin currentEnvironment store omits
+	// the flag on some switch paths, which otherwise reverts it to the default.
+	const highlightChangesEnabled = $derived(
+		currentEnvDetails?.highlightChanges ?? $currentEnvironment?.highlightChanges ?? true
+	);
 
 	// Helper to check if a stat field changed significantly
 	function hasFieldChanged(containerId: string, field: string, oldVal: number | undefined, newVal: number | undefined): boolean {
@@ -1096,13 +1262,15 @@
 	}
 
 	function startTerminal(container: ContainerInfo) {
-		saveUserForContainer(container.id, terminalUser);
+		const mode: TerminalMode = terminalMode;
+		if (mode === 'exec') saveUserForContainer(container.id, terminalUser);
 		terminalCustomUsers = getCustomUsers();
 		const terminal: ActiveTerminal = {
 			containerId: container.id,
 			containerName: container.name,
 			shell: terminalShell,
-			user: terminalUser
+			user: terminalUser,
+			mode
 		};
 		activeTerminals = [...activeTerminals, terminal];
 		currentTerminalContainerId = container.id;
@@ -1171,6 +1339,7 @@
 	function browseFiles(container: ContainerInfo) {
 		fileBrowserContainerId = container.id;
 		fileBrowserContainerName = container.name;
+		fileBrowserContainerImage = container.image;
 		showFileBrowserModal = true;
 	}
 
@@ -1290,31 +1459,6 @@
 		return -Infinity;
 	}
 
-	function parseTimeStringToSeconds(timeStr: string): number {
-		// Parse strings like "2 hours", "3 days", "About a minute", "Less than a second"
-		const str = timeStr.toLowerCase();
-
-		if (str.includes('second')) return 1;
-		if (str.includes('less than a minute') || str.includes('about a minute')) return 60;
-
-		const match = str.match(/(\d+)\s*(second|minute|hour|day|week|month|year)/);
-		if (!match) return 0;
-
-		const value = parseInt(match[1], 10);
-		const unit = match[2];
-
-		switch (unit) {
-			case 'second': return value;
-			case 'minute': return value * 60;
-			case 'hour': return value * 3600;
-			case 'day': return value * 86400;
-			case 'week': return value * 604800;
-			case 'month': return value * 2592000;
-			case 'year': return value * 31536000;
-			default: return 0;
-		}
-	}
-
 	function getHealthVariant(health?: string): 'default' | 'destructive' | 'secondary' | 'outline' {
 		switch (health) {
 			case 'healthy':
@@ -1348,6 +1492,7 @@
 			sortDirection = field === 'state' ? 'asc' : 'asc';
 		}
 	}
+
 
 
 	// Handle tab visibility changes (e.g., user switches back from another tab)
@@ -1417,16 +1562,7 @@
 	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
 		<PageHeader icon={Box} title="Containers" count={containers.length} />
 		<div class="flex flex-wrap items-center gap-2">
-			<div class="relative">
-				<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-				<Input
-					type="text"
-					placeholder="Search containers..."
-					bind:value={searchQuery}
-					onkeydown={(e) => e.key === 'Escape' && (searchQuery = '')}
-					class="pl-8 h-8 w-48 text-sm"
-				/>
-			</div>
+			<SearchInput bind:value={searchQuery} placeholder="Search name, image, label..." class="h-8 w-64 text-sm" />
 			<!-- Status filter (multi-select). The synthetic 'update-available'
 			     entry appears once at least one container has a pending update,
 			     and ANDs with selected real states (#1063). -->
@@ -1438,7 +1574,11 @@
 				width="w-44"
 				defaultIcon={Box}
 			/>
-			<div class="flex gap-2">
+			<TagFilter tags={tagCatalog} bind:selected={tagFilter} bind:mode={tagFilterMode} bind:groupBy={groupByTag} bind:showTags={showTags} bind:showBands={showBands} bind:inlineEditing={inlineTagEditing} bind:settingsExpanded={tagSettingsExpanded} />
+			<!-- Action buttons: scroll horizontally on narrow screens (mobile) instead of
+			     clipping the overflow. min-w-0 lets the row shrink below its content so
+			     overflow-x can kick in; shrink-0 keeps each button its natural size. -->
+			<div class="flex gap-2 overflow-x-auto min-w-0 max-w-full [&>*]:shrink-0">
 				{#if $canAccess('containers', 'create')}
 				<Button size="sm" variant="secondary" onclick={() => (showCreateModal = true)}>
 					<Plus class="w-3.5 h-3.5" />
@@ -1700,6 +1840,10 @@
 				gridId="containers"
 				loading={loading}
 				selectable
+				groupBy={containerGroupBy}
+				bind:collapsedGroups={collapsedGroups}
+				ungroupedLabel="Untagged"
+				showGroupBands={showBands}
 				bind:selectedKeys={selectedContainers}
 				sortState={{ field: sortField, direction: sortDirection }}
 				onSortChange={(state) => { sortField = state.field as SortField; sortDirection = state.direction; }}
@@ -1718,85 +1862,104 @@
 					highlightedRowId = highlightedRowId === container.id ? null : container.id;
 				}}
 			>
+				{#snippet groupHeaderLabel(group)}
+					{#each group.icons as ic}
+						{#if ic}<TagLucideIcon name={ic} class="h-3 w-3 shrink-0" />{:else}<Tag class="h-3 w-3 shrink-0" />{/if}
+					{/each}
+					<span>{group.label}</span>
+				{/snippet}
 				{#snippet cell(column, container, rowState)}
 					{@const ports = formatPorts(container.ports)}
 					{@const stack = getComposeProject(container.labels)}
 					{#if column.id === 'name'}
 						<div class="flex items-center gap-1.5 min-w-0">
+							<ContainerIcon image={container.image} name={container.name} override={iconOverrides[container.name]} {envId} class="w-4 h-4" />
 							<button
 								type="button"
 								class="text-xs font-medium truncate text-left hover:text-primary hover:underline cursor-pointer"
 								title={container.name}
 								onclick={(e) => { e.stopPropagation(); inspectContainer(container); }}
 							>{container.name}</button>
-							{#if container.systemContainer}
-								{@const hasUpdate = containersWithUpdatesSet.has(container.id)}
+							<!-- System containers (Dockhand, Hawser) carry no label badge; only an
+							     amber update indicator when a new version is out (they can't be
+							     self-updated from the UI, so the tooltip points to the update path). -->
+							{#if container.systemContainer && containersWithUpdatesSet.has(container.id)}
 								<Tooltip.Root>
 									<Tooltip.Trigger>
-										<Badge variant="secondary" class="text-2xs py-0 px-1 shrink-0 {hasUpdate ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20' : 'bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20'} cursor-help flex items-center gap-0.5">
-											{#if container.systemContainer === 'dockhand'}
-												<Ship class="w-2.5 h-2.5" />
-											{:else}
-												<Cable class="w-2.5 h-2.5" />
-											{/if}
-											{container.systemContainer === 'dockhand' ? 'Dockhand' : 'Hawser'}
-											{#if hasUpdate}
-												<CircleArrowUp class="w-2.5 h-2.5" />
-											{/if}
+										<Badge variant="secondary" class="text-2xs py-0 px-1 shrink-0 bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 cursor-help flex items-center gap-0.5">
+											<CircleArrowUp class="w-2.5 h-2.5" />
 										</Badge>
 									</Tooltip.Trigger>
 									<Tooltip.Content side="right" class="w-auto p-3">
-										{#if container.systemContainer === 'dockhand'}
-											{#if hasUpdate}
-												<div class="space-y-2">
-													<p class="font-medium text-sm flex items-center gap-1.5 whitespace-nowrap">
-														<CircleArrowUp class="w-4 h-4 text-amber-500" />
-														Update available
-													</p>
-													<a
-														href="/settings?tab=about"
-														class="text-primary hover:underline text-xs flex items-center gap-1 whitespace-nowrap"
-														onclick={(e) => e.stopPropagation()}
-													>
-														Settings &gt; About
-													</a>
-												</div>
+										<div class="space-y-2">
+											<p class="font-medium text-sm flex items-center gap-1.5 whitespace-nowrap">
+												<CircleArrowUp class="w-4 h-4 text-amber-500" />
+												Update available
+											</p>
+											{#if container.systemContainer === 'dockhand'}
+												<a
+													href="/settings?tab=about"
+													class="text-primary hover:underline text-xs flex items-center gap-1 whitespace-nowrap"
+													onclick={(e) => e.stopPropagation()}
+												>
+													Settings &gt; About
+												</a>
 											{:else}
-												<p class="text-sm whitespace-nowrap">Dockhand management container</p>
+												<p class="text-muted-foreground text-xs whitespace-nowrap">Update on the remote host where Hawser runs.</p>
+												<a
+													href="https://github.com/Finsys/hawser"
+													target="_blank"
+													rel="noopener noreferrer"
+													class="text-primary hover:underline text-xs flex items-center gap-1 whitespace-nowrap"
+													onclick={(e) => e.stopPropagation()}
+												>
+													<ExternalLink class="w-3 h-3" />
+													Update instructions on GitHub
+												</a>
 											{/if}
-										{:else}
-											{#if hasUpdate}
-												<div class="space-y-2">
-													<p class="font-medium text-sm flex items-center gap-1.5 whitespace-nowrap">
-														<CircleArrowUp class="w-4 h-4 text-amber-500" />
-														Update available
-													</p>
-													<p class="text-muted-foreground text-xs whitespace-nowrap">Update on the remote host where Hawser runs.</p>
-													<a
-														href="https://github.com/Finsys/hawser"
-														target="_blank"
-														rel="noopener noreferrer"
-														class="text-primary hover:underline text-xs flex items-center gap-1 whitespace-nowrap"
-														onclick={(e) => e.stopPropagation()}
-													>
-														<ExternalLink class="w-3 h-3" />
-														Update instructions on GitHub
-													</a>
-												</div>
-											{:else}
-												<p class="text-sm whitespace-nowrap">Hawser remote agent</p>
-											{/if}
-										{/if}
+										</div>
 									</Tooltip.Content>
 								</Tooltip.Root>
+							{/if}
+							{#if showTags}<TagChips tags={tagsFor(container.name)} />{/if}
+							{#if inlineTagEditing && $canAccess('containers', 'edit')}
+								<span onclick={(e) => e.stopPropagation()} role="presentation">
+									<TagEditPopover
+										catalog={tagCatalog}
+										selected={tagsMap[container.name] ?? []}
+										onCreate={createTag}
+										onApply={(ids) => applyContainerTags(container.name, ids)}
+										allowCreate={$isAdmin}
+									/>
+								</span>
 							{/if}
 						</div>
 					{:else if column.id === 'image'}
 						<div class="flex items-center gap-1.5 {$appSettings.highlightUpdates && containersWithUpdatesSet.has(container.id) ? 'update-border' : ''}">
 							{#if containersWithUpdatesSet.has(container.id)}
-								<span title="Update available">
-									<CircleArrowUp class="w-3 h-3 text-amber-500 {$appSettings.highlightUpdates ? 'glow-amber' : ''} shrink-0" />
-								</span>
+								{#if container.systemContainer}
+									<!-- System containers cannot be updated from the UI - show the
+									     indicator but leave it non-clickable (matches the actions column). -->
+									<span title="Update available">
+										<CircleArrowUp class="w-3 h-3 text-amber-500 {$appSettings.highlightUpdates ? 'glow-amber' : ''} shrink-0" />
+									</span>
+								{:else}
+									<ConfirmPopover
+										open={confirmImageUpdateId === container.id}
+										action="Update"
+										itemType="container"
+										itemName={container.name}
+										title="Update available - click to update"
+										onConfirm={() => updateSingleContainer(container.id, container.name)}
+										onOpenChange={(open) => confirmImageUpdateId = open ? container.id : null}
+									>
+										{#snippet children({ open })}
+											<span title="Update available" class="cursor-pointer">
+												<CircleArrowUp class="w-3 h-3 text-amber-500 hover:text-amber-400 transition-colors {$appSettings.highlightUpdates ? 'glow-amber' : ''} shrink-0" />
+											</span>
+										{/snippet}
+									</ConfirmPopover>
+								{/if}
 								{#if $appSettings.showImageChangelogLinks}
 									{@const changelogUrl = resolveChangelogUrl(container.image, container.labels)}
 									{#if changelogUrl}
@@ -1883,10 +2046,11 @@
 						<div class="{isFieldHighlighted(container.id, 'memory') ? 'stat-highlight' : ''} text-right">
 							{#if containerStats.get(container.id)}
 								{@const stats = containerStats.get(container.id)}
+								{@const memLimitLabel = stats.memoryLimit ? formatBytes(stats.memoryLimit) : 'unlimited'}
 								{@const memoryTooltip = stats.memoryCache > 0
-									? `${formatBytes(stats.memoryUsage)} / ${formatBytes(stats.memoryLimit)} (Total: ${formatBytes(stats.memoryRaw)} | Cache: ${formatBytes(stats.memoryCache)})`
-									: `${formatBytes(stats.memoryUsage)} / ${formatBytes(stats.memoryLimit)}`}
-								<span class="text-xs font-mono {stats.memoryPercent > 80 ? 'text-red-500' : stats.memoryPercent > 50 ? 'text-yellow-500' : 'text-muted-foreground'}" title={memoryTooltip}>{formatBytesCompact(stats.memoryUsage)}<span class="text-muted-foreground/50">/{formatBytesCompact(stats.memoryLimit, 0)}</span></span>
+									? `${formatBytes(stats.memoryUsage)} / ${memLimitLabel} (Total: ${formatBytes(stats.memoryRaw)} | Cache: ${formatBytes(stats.memoryCache)})`
+									: `${formatBytes(stats.memoryUsage)} / ${memLimitLabel}`}
+								<span class="text-xs font-mono {stats.memoryPercent > 80 ? 'text-red-500' : stats.memoryPercent > 50 ? 'text-yellow-500' : 'text-muted-foreground'}" title={memoryTooltip}>{formatBytesCompact(stats.memoryUsage)}<span class="text-muted-foreground/50">/{stats.memoryLimit ? formatBytesCompact(stats.memoryLimit, 0) : '∞'}</span></span>
 							{:else if container.state === 'running'}
 								<span class="text-xs text-muted-foreground/50">...</span>
 							{:else}
@@ -2058,6 +2222,12 @@
 									{/if}
 								{/if}
 							</div>
+						{:else if !$canAccess('schedules', 'view')}
+							<!-- The schedules are withheld from this account, so the cell says
+							     that rather than the "-" that claims nothing is scheduled. -->
+							<span
+								class="text-gray-400 dark:text-gray-600 text-xs text-center block cursor-default"
+								title="You do not have permission to view schedules">?</span>
 						{:else}
 							<span class="text-gray-400 dark:text-gray-600 text-xs text-center block">-</span>
 						{/if}
@@ -2131,7 +2301,15 @@
 							{:else}
 								<Popover.Root open={terminalPopoverStates[container.id] ?? false} onOpenChange={(open) => {
 									terminalPopoverStates[container.id] = open;
-									if (open) detectContainerShells(container.id);
+									if (open) {
+										// Default each freshly-opened session to exec so a prior container's
+										// Attach choice (terminalMode is shared) doesn't carry over, and the
+										// picker/shell controls always render. Restore this container's saved user.
+										terminalMode = 'exec';
+										terminalUser = getSavedUser(container.id) ?? 'root';
+										terminalCustomUsers = getCustomUsers();
+										detectContainerShells(container.id);
+									}
 								}}>
 									<Popover.Trigger
 										onclick={(e: MouseEvent) => e.stopPropagation()}
@@ -2146,12 +2324,12 @@
 												<span class="text-xs font-medium truncate" title={container.name}>{container.name}</span>
 											</div>
 										</div>
-										{#if detectingShellsFor === container.id}
+										{#if terminalMode === 'exec' && detectingShellsFor === container.id}
 											<div class="p-4 text-center">
 												<Loader2 class="w-5 h-5 mx-auto mb-2 text-muted-foreground animate-spin" />
 												<p class="text-xs text-muted-foreground">Detecting shells...</p>
 											</div>
-										{:else if !anyShellAvailableFor(container.id)}
+										{:else if terminalMode === 'exec' && !anyShellAvailableFor(container.id)}
 											<div class="p-4 text-center">
 												<AlertCircle class="w-5 h-5 mx-auto mb-2 text-amber-500" />
 												<p class="text-xs font-medium text-amber-500">No shell available</p>
@@ -2160,76 +2338,105 @@
 										{:else}
 											<div class="p-3 space-y-3">
 												<div class="space-y-1.5">
-													<Label class="text-xs">Shell</Label>
-													<Select.Root type="single" bind:value={terminalShell}>
+													<Label class="text-xs">Mode</Label>
+													<Select.Root type="single" value={terminalMode} onValueChange={(value) => {
+														terminalMode = value as TerminalMode;
+														if (terminalMode === 'exec') detectContainerShells(container.id);
+													}}>
 														<Select.Trigger class="w-full h-8 text-xs">
-															<Shell class="w-3 h-3 mr-1.5 text-muted-foreground" />
-															<span>{shellDetectionCache[container.id]?.allShells.find(o => o.path === terminalShell)?.label || 'Select'}</span>
+															{#if terminalMode === 'attach'}
+																<Unplug class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																Attach to process
+															{:else}
+																<Shell class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																Shell (exec)
+															{/if}
 														</Select.Trigger>
 														<Select.Content>
-															{#if shellDetectionCache[container.id]}
-																{#each shellDetectionCache[container.id].allShells as option}
-																	<Select.Item value={option.path} label={option.label} disabled={!option.available}>
-																		<Shell class="w-3 h-3 mr-1.5 {option.available ? 'text-green-500' : 'text-muted-foreground/40'}" />
-																		<span class={option.available ? 'text-foreground' : 'text-muted-foreground/60'}>
-																			{option.label}
-																			{#if !option.available}
-																				<span class="text-xs ml-1">(unavailable)</span>
-																			{/if}
-																		</span>
+															<Select.Item value="exec" label="Shell (exec)">
+																<Shell class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																Shell (exec)
+															</Select.Item>
+															<Select.Item value="attach" label="Attach to process">
+																<Unplug class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																Attach to process
+															</Select.Item>
+														</Select.Content>
+													</Select.Root>
+													</div>
+													{#if terminalMode === 'exec'}
+														<div class="space-y-1.5">
+															<Label class="text-xs">Shell</Label>
+															<Select.Root type="single" bind:value={terminalShell}>
+																<Select.Trigger class="w-full h-8 text-xs">
+																	<Shell class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																	<span>{shellDetectionCache[container.id]?.allShells.find(o => o.path === terminalShell)?.label || 'Select'}</span>
+																</Select.Trigger>
+																<Select.Content>
+																	{#if shellDetectionCache[container.id]}
+																		{#each shellDetectionCache[container.id].allShells as option}
+																			<Select.Item value={option.path} label={option.label} disabled={!option.available}>
+																				<Shell class="w-3 h-3 mr-1.5 {option.available ? 'text-green-500' : 'text-muted-foreground/40'}" />
+																				<span class={option.available ? 'text-foreground' : 'text-muted-foreground/60'}>
+																					{option.label}
+																					{#if !option.available}
+																						<span class="text-xs ml-1">(unavailable)</span>
+																					{/if}
+																				</span>
+																			</Select.Item>
+																		{/each}
+																	{/if}
+																</Select.Content>
+															</Select.Root>
+													</div>
+													<div class="space-y-1.5">
+														<Label class="text-xs">User</Label>
+														<Select.Root type="single" bind:value={terminalUser}>
+															<Select.Trigger class="w-full h-8 text-xs">
+																<User class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																<span>{userOptions.find(o => o.value === terminalUser)?.label || terminalUser || 'Select'}</span>
+															</Select.Trigger>
+															<Select.Content>
+																{#each userOptions as option}
+																	<Select.Item value={option.value} label={option.label}>
+																		<User class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																		{option.label}
 																	</Select.Item>
 																{/each}
-															{/if}
-														</Select.Content>
-													</Select.Root>
-												</div>
-												<div class="space-y-1.5">
-													<Label class="text-xs">User</Label>
-													<Select.Root type="single" bind:value={terminalUser}>
-														<Select.Trigger class="w-full h-8 text-xs">
-															<User class="w-3 h-3 mr-1.5 text-muted-foreground" />
-															<span>{userOptions.find(o => o.value === terminalUser)?.label || terminalUser || 'Select'}</span>
-														</Select.Trigger>
-														<Select.Content>
-															{#each userOptions as option}
-																<Select.Item value={option.value} label={option.label}>
-																	<User class="w-3 h-3 mr-1.5 text-muted-foreground" />
-																	{option.label}
-																</Select.Item>
-															{/each}
-															{#if terminalCustomUsers.length > 0}
+																{#if terminalCustomUsers.length > 0}
+																	<div class="h-px bg-border my-1"></div>
+																	{#each terminalCustomUsers as cu}
+																		<div class="flex items-center group">
+																			<Select.Item value={cu} label={cu} class="flex-1">
+																				<User class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																				{cu}
+																			</Select.Item>
+																			<button
+																				type="button"
+																				class="p-1 mr-1 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+																				onclick={(e) => { e.stopPropagation(); e.preventDefault(); removeCustomUser(cu); terminalCustomUsers = getCustomUsers(); if (terminalUser === cu) { terminalUser = 'root'; } }}
+																				title="Remove user"
+																			>
+																				<Trash2 class="w-3 h-3" />
+																			</button>
+																		</div>
+																	{/each}
+																{/if}
 																<div class="h-px bg-border my-1"></div>
-																{#each terminalCustomUsers as cu}
-																	<div class="flex items-center group">
-																		<Select.Item value={cu} label={cu} class="flex-1">
-																			<User class="w-3 h-3 mr-1.5 text-muted-foreground" />
-																			{cu}
-																		</Select.Item>
-																		<button
-																			type="button"
-																			class="p-1 mr-1 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
-																			onclick={(e) => { e.stopPropagation(); e.preventDefault(); removeCustomUser(cu); terminalCustomUsers = getCustomUsers(); if (terminalUser === cu) { terminalUser = 'root'; } }}
-																			title="Remove user"
-																		>
-																			<Trash2 class="w-3 h-3" />
-																		</button>
-																	</div>
-																{/each}
-															{/if}
-															<div class="h-px bg-border my-1"></div>
-															<div class="px-2 py-1">
-																<Input
-																	class="h-7 text-xs"
-																	placeholder="Add user... (Enter)"
-																	bind:value={terminalCustomUser}
-																	onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && terminalCustomUser.trim()) { const u = terminalCustomUser.trim(); terminalUser = u; saveUserForContainer(container.id, u); terminalCustomUsers = getCustomUsers(); terminalCustomUser = ''; } }}
-																	onclick={(e) => e.stopPropagation()}
-																/>
-															</div>
-														</Select.Content>
-													</Select.Root>
-												</div>
-												<Button size="sm" class="w-full h-7 text-xs" onclick={() => startTerminal(container)}>
+																<div class="px-2 py-1">
+																	<Input
+																		class="h-7 text-xs"
+																		placeholder="Add user... (Enter)"
+																		bind:value={terminalCustomUser}
+																		onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && terminalCustomUser.trim()) { const u = terminalCustomUser.trim(); terminalUser = u; saveUserForContainer(container.id, u); terminalCustomUsers = getCustomUsers(); terminalCustomUser = ''; } }}
+																		onclick={(e) => e.stopPropagation()}
+																	/>
+																</div>
+															</Select.Content>
+														</Select.Root>
+													</div>
+												{/if}
+													<Button size="sm" class="w-full h-7 text-xs" onclick={() => startTerminal(container)}>
 													<Terminal class="w-3 h-3" />
 													Connect
 												</Button>
@@ -2394,24 +2601,27 @@
 						{/if}
 					{/if}
 
-					<!-- Current Terminal Panel -->
-					{#if currentTerminalContainerId}
-						{@const activeTerminal = activeTerminals.find(t => t.containerId === currentTerminalContainerId)}
-						{#if activeTerminal}
-							<div class="flex-1 min-h-0">
-								<TerminalPanel
-									containerId={activeTerminal.containerId}
-									containerName={activeTerminal.containerName}
-									shell={activeTerminal.shell}
-									user={activeTerminal.user}
-									visible={true}
-									envId={envId}
-									fillHeight={true}
-									onClose={() => closeTerminal(activeTerminal.containerId)}
-								/>
-							</div>
-						{/if}
-					{/if}
+					<!-- Terminal panels: render EVERY open session so each keeps its own
+					     live WebSocket/xterm; only the current one is visible. Switching
+					     just toggles visibility, so a running process (e.g. top) in a
+					     backgrounded session stays alive and its shell stays its own. -->
+					{#each activeTerminals as t (t.containerId)}
+						<!-- Do NOT display:none a backgrounded panel; TerminalPanel hides
+						     itself off-screen while keeping its size so xterm can fit. -->
+						<div class="min-h-0" class:flex-1={t.containerId === currentTerminalContainerId}>
+							<TerminalPanel
+								containerId={t.containerId}
+								containerName={t.containerName}
+								shell={t.shell}
+								user={t.user}
+								mode={t.mode}
+								visible={t.containerId === currentTerminalContainerId}
+								envId={envId}
+								fillHeight={true}
+								onClose={() => closeTerminal(t.containerId)}
+							/>
+						</div>
+					{/each}
 				</div>
 			{/if}
 		</div>
@@ -2432,21 +2642,22 @@
 				{/if}
 			{/if}
 
-			<!-- Show current terminal panel -->
-			{#if currentTerminalContainerId}
-				{@const activeTerminal = activeTerminals.find(t => t.containerId === currentTerminalContainerId)}
-				{#if activeTerminal}
-					<TerminalPanel
-						containerId={activeTerminal.containerId}
-						containerName={activeTerminal.containerName}
-						shell={activeTerminal.shell}
-						user={activeTerminal.user}
-						visible={true}
-						envId={envId}
-						onClose={() => closeTerminal(activeTerminal.containerId)}
-					/>
-				{/if}
-			{/if}
+			<!-- Terminal panels: render every open session (each keeps its own live
+			     WebSocket/xterm); only the current one is visible. -->
+			{#each activeTerminals as t (t.containerId)}
+				<!-- TerminalPanel hides a backgrounded session off-screen (keeps size for
+				     xterm fit); do not display:none it or a background xterm gets 0x0. -->
+				<TerminalPanel
+					containerId={t.containerId}
+					containerName={t.containerName}
+					shell={t.shell}
+					user={t.user}
+					mode={t.mode}
+					visible={t.containerId === currentTerminalContainerId}
+					envId={envId}
+					onClose={() => closeTerminal(t.containerId)}
+				/>
+			{/each}
 		{/if}
 	{/if}
 </div>
@@ -2460,8 +2671,9 @@
 <EditContainerModal
 	bind:open={showEditModal}
 	containerId={editContainerId}
-	onClose={() => (showEditModal = false)}
+	onClose={() => { showEditModal = false; loadTags(envId); }}
 	onSuccess={fetchContainers}
+	onIconChanged={() => loadIconOverrides(envId)}
 />
 
 <ContainerInspectModal
@@ -2479,12 +2691,16 @@
 	onRestart={$canAccess('containers', 'restart') ? (id) => restartContainer(id) : undefined}
 	onRemove={$canAccess('containers', 'remove') ? (id) => removeContainer(id) : undefined}
 	onEdit={$canAccess('containers', 'edit') ? (id) => editContainer(id) : undefined}
+	onUpdate={$canAccess('containers', 'create')
+		? (id, name) => updateSingleContainer(id, name)
+		: undefined}
 />
 
 <FileBrowserModal
 	bind:open={showFileBrowserModal}
 	containerId={fileBrowserContainerId}
 	containerName={fileBrowserContainerName}
+	containerImage={fileBrowserContainerImage}
 	envId={envId ?? undefined}
 	onclose={() => showFileBrowserModal = false}
 />

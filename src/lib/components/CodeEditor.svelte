@@ -11,6 +11,8 @@
 	import { oneDarkHighlightStyle } from '@codemirror/theme-one-dark';
 	import { indentationMarkers } from '@replit/codemirror-indentation-markers';
 	import { themeStore } from '$lib/stores/theme';
+	import { getEditorThemeExtension } from '$lib/utils/editor-theme-extensions';
+	import { gutterBackgroundFor } from '$lib/utils/gutter-contrast';
 	import { get } from 'svelte/store';
 	import { shell } from '@codemirror/legacy-modes/mode/shell';
 	import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile';
@@ -231,13 +233,18 @@
 		lintMarkers?: LintMarker[];
 		/** Fired when a lint gutter icon / underlined line is clicked (for the mini-modal). */
 		onLintClick?: (line: number) => void;
+		/** 1-based inclusive line ranges highlighted as freshly-added (green), e.g. a merged-in service. */
+		addedLineMarkers?: { line: number; endLine: number }[];
+		/** Force a specific editor color theme id, ignoring the user's stored preference (live preview). */
+		editorThemeOverride?: string;
 	}
 
-	let { value = '', language = 'yaml', readonly = false, theme = 'dark', onchange, class: className = '', variableMarkers: variableMarkersProp = [], lintMarkers: lintMarkersProp = [], onLintClick }: Props = $props();
+	let { value = '', language = 'yaml', readonly = false, theme = 'dark', onchange, class: className = '', variableMarkers: variableMarkersProp = [], lintMarkers: lintMarkersProp = [], onLintClick, addedLineMarkers: addedLineMarkersProp = [], editorThemeOverride }: Props = $props();
 
 	// Keep markers reactive - destructured props with defaults lose reactivity
 	const variableMarkers = $derived(variableMarkersProp);
 	const lintMarkers = $derived(lintMarkersProp);
+	const addedLineMarkers = $derived(addedLineMarkersProp);
 
 	let container: HTMLDivElement;
 	let view: EditorView | null = null;
@@ -640,6 +647,38 @@
 		provide: (f) => EditorView.decorations.from(f)
 	});
 
+	// Added-line highlight (green background) for a range of lines, e.g. a service merged
+	// into an existing compose. Reuses the lint decoration pattern; no gutter icon.
+	const updateAddedEffect = StateEffect.define<{ line: number; endLine: number }[]>();
+	const currentAddedField = StateField.define<{ line: number; endLine: number }[]>({
+		create: () => addedLineMarkers,
+		update(v, tr) {
+			for (const e of tr.effects) if (e.is(updateAddedEffect)) return e.value;
+			return v;
+		}
+	});
+
+	function buildAddedDecorations(doc: any, ranges: { line: number; endLine: number }[]): DecorationSet {
+		const decos: { from: number; deco: Decoration }[] = [];
+		for (const r of ranges) {
+			for (let line = r.line; line <= r.endLine; line++) {
+				if (line < 1 || line > doc.lines) continue;
+				decos.push({ from: doc.line(line).from, deco: Decoration.line({ class: 'cm-added-line' }) });
+			}
+		}
+		decos.sort((a, b) => a.from - b.from);
+		return Decoration.set(decos.map((d) => d.deco.range(d.from)), true);
+	}
+
+	const addedDecorationsField = StateField.define<DecorationSet>({
+		create: (state) => buildAddedDecorations(state.doc, addedLineMarkers),
+		update(v, tr) {
+			for (const e of tr.effects) if (e.is(updateAddedEffect)) return buildAddedDecorations(tr.state.doc, e.value);
+			return tr.docChanged ? buildAddedDecorations(tr.state.doc, tr.state.field(currentAddedField)) : v;
+		},
+		provide: (f) => EditorView.decorations.from(f)
+	});
+
 	const lintGutter = gutter({
 		class: 'cm-lint-gutter',
 		markers: (view) => view.state.field(lintGutterField)
@@ -724,9 +763,9 @@
 			padding: '8px 0'
 		},
 		'.cm-gutters': {
-			backgroundColor: '#1a1a1a',
+			backgroundColor: '#212121',
 			color: '#858585',
-			border: 'none',
+			borderRight: '1px solid #333333',
 			fontFamily: 'var(--font-editor, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace)',
 			fontSize: '13px'
 		},
@@ -766,14 +805,14 @@
 			padding: '8px 0'
 		},
 		'.cm-gutters': {
-			backgroundColor: '#fafafa',
+			backgroundColor: '#f1f1f1',
 			color: '#a1a1aa',
-			border: 'none',
+			borderRight: '1px solid #e0e0e0',
 			fontFamily: 'var(--font-editor, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace)',
 			fontSize: '13px'
 		},
 		'.cm-activeLineGutter': {
-			backgroundColor: '#f4f4f5'
+			backgroundColor: '#e8e8e8'
 		},
 		'.cm-activeLine': {
 			backgroundColor: '#f4f4f5'
@@ -802,13 +841,51 @@
 	// Track last applied markers to avoid redundant updates
 	let lastAppliedMarkersJson = '';
 
+	// Give the gutter a background derived from the (rendered) code background so line
+	// numbers stay visibly separated on any @uiw theme (#1309). Reads the real applied
+	// colour, so it works without knowing the theme's palette.
+	function applyGutterContrast() {
+		if (!view) return;
+		const gutters = view.dom.querySelector('.cm-gutters') as HTMLElement | null;
+		if (!gutters) return;
+		// The theme background can sit on .cm-content, the editor root, or the scroller;
+		// take the first that resolves to a real rgb() (skip transparent).
+		let gutterBg: string | null = null;
+		for (const sel of ['.cm-content', '.cm-scroller', '.cm-editor']) {
+			const el = (sel === '.cm-editor' ? view.dom : view.dom.querySelector(sel)) as HTMLElement | null;
+			if (!el) continue;
+			gutterBg = gutterBackgroundFor(getComputedStyle(el).backgroundColor);
+			if (gutterBg) break;
+		}
+		if (gutterBg) gutters.style.backgroundColor = gutterBg;
+	}
+
 	function createEditor() {
 		if (!container || view || initialized) return;
 		initialized = true;
 
-		const themeExtensions = theme === 'dark'
-			? [dockhandDark, syntaxHighlighting(oneDarkHighlightStyle)]
-			: [dockhandLight, syntaxHighlighting(defaultHighlightStyle)];
+		// Editor color theme (#1309): 'default' keeps the built-in theme that follows
+		// the app's dark/light toggle; any other id applies a @uiw theme extension
+		// (self-contained - it brings its own background/gutter/syntax colors).
+		const editorThemeId = editorThemeOverride ?? get(themeStore).editorTheme;
+		const pickedExtension = getEditorThemeExtension(editorThemeId);
+		// @uiw themes don't set a font, and most give the gutter the same background as the
+		// code so line numbers blend in (#1309). Force the user's editor font and a firmer
+		// border here; the distinct gutter BACKGROUND is derived from the rendered code
+		// background after mount (applyGutterContrast) so it stays visible on any theme.
+		const editorThemeTweaks = EditorView.theme({
+			'.cm-content, .cm-gutters': {
+				fontFamily: 'var(--font-editor, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace)'
+			},
+			'.cm-gutters': {
+				borderRight: '1px solid rgba(128, 128, 128, 0.5)'
+			}
+		});
+		const themeExtensions = pickedExtension
+			? [pickedExtension, editorThemeTweaks]
+			: theme === 'dark'
+				? [dockhandDark, syntaxHighlighting(oneDarkHighlightStyle)]
+				: [dockhandLight, syntaxHighlighting(defaultHighlightStyle)];
 
 		// Build autocompletion config - add Docker Compose completions for YAML
 		// Note: activateOnTyping can interfere with key repeat, so we disable it
@@ -872,6 +949,10 @@
 			extensions.push(currentLintField, lintGutterField, lintDecorationsField, lintGutter);
 		}
 
+		// Added-line highlight fields are always wired (empty = no decorations) so a consumer
+		// can push ranges AFTER mount (e.g. once a stack is picked) via the reactive dispatch.
+		extensions.push(currentAddedField, addedDecorationsField);
+
 		const state = EditorState.create({
 			doc: value,
 			extensions
@@ -903,6 +984,11 @@
 			dispatchTransactions
 		});
 
+		// Derive a visibly distinct gutter background from the theme's rendered code
+		// background (#1309). Only for @uiw themes; the built-in dockhand themes set their
+		// own gutter colour. Runs after mount so getComputedStyle sees the applied theme.
+		if (pickedExtension) applyGutterContrast();
+
 		// Push initial variable markers if provided. Lint markers need no initial
 		// dispatch: currentLintField/gutter are created from lintMarkers, and the reactive
 		// $effect below fires once on mount - dispatching here too would double it.
@@ -918,6 +1004,7 @@
 		const markers = lintMarkers;
 		if (view) view.dispatch({ effects: updateLintEffect.of(markers) });
 	});
+
 
 	function destroyEditor() {
 		if (markerUpdateTimer) {
@@ -940,19 +1027,40 @@
 	// Set editor content
 	export function setValue(newValue: string) {
 		if (view) {
+			// Programmatic replace must NOT fire onchange (it is not a user edit). Also clear
+			// any added-line highlight - a plain setValue (cancel merge, env toggle) replaces
+			// the whole doc, so a stale range would highlight the wrong lines.
+			isSyncingExternalValue = true;
 			view.dispatch({
 				changes: {
 					from: 0,
 					to: view.state.doc.length,
 					insert: newValue
-				}
+				},
+				effects: updateAddedEffect.of([])
 			});
+			isSyncingExternalValue = false;
 		}
 	}
 
 	// Focus the editor
 	export function focus() {
 		view?.focus();
+	}
+
+	/**
+	 * Replace the document AND set the added-line highlight in ONE transaction, so the
+	 * green decorations are computed against the new text atomically (a separate reactive
+	 * dispatch races the doc change and lands on the old/empty doc).
+	 */
+	export function setValueWithAddedRanges(newValue: string, ranges: { line: number; endLine: number }[]) {
+		if (!view) return;
+		isSyncingExternalValue = true; // programmatic replace, not a user edit
+		view.dispatch({
+			changes: { from: 0, to: view.state.doc.length, insert: newValue },
+			effects: updateAddedEffect.of(ranges)
+		});
+		isSyncingExternalValue = false;
 	}
 
 	/** Scroll a 1-based line into view and place the cursor on it (used by validate jump-to). */
@@ -1013,17 +1121,23 @@
 	let prevLanguage = $state(language);
 	let prevTheme = $state(theme);
 	let prevIndentGuides = $state($themeStore.editorIndentGuides);
+	let prevEditorTheme = $state(editorThemeOverride ?? $themeStore.editorTheme);
+	let prevEditorFont = $state($themeStore.editorFont);
 
-	// Recreate editor if language, theme, or the indent-guides preference changes
+	// Recreate editor if language, theme, indent-guides, the color theme, or the editor font changes
 	$effect(() => {
 		const currentLanguage = language;
 		const currentTheme = theme;
 		const currentIndentGuides = $themeStore.editorIndentGuides;
+		const currentEditorTheme = editorThemeOverride ?? $themeStore.editorTheme;
+		const currentEditorFont = $themeStore.editorFont;
 
-		if (view && (currentLanguage !== prevLanguage || currentTheme !== prevTheme || currentIndentGuides !== prevIndentGuides)) {
+		if (view && (currentLanguage !== prevLanguage || currentTheme !== prevTheme || currentIndentGuides !== prevIndentGuides || currentEditorTheme !== prevEditorTheme || currentEditorFont !== prevEditorFont)) {
 			prevLanguage = currentLanguage;
 			prevTheme = currentTheme;
 			prevIndentGuides = currentIndentGuides;
+			prevEditorTheme = currentEditorTheme;
+			prevEditorFont = currentEditorFont;
 			const currentContent = view.state.doc.toString();
 			destroyEditor();
 			value = currentContent; // Preserve content
@@ -1152,6 +1266,12 @@
 	}
 	div :global(.cm-lint-line-info) {
 		background-color: rgba(59, 130, 246, 0.06);
+	}
+
+	/* Freshly-added lines (e.g. a service merged into an existing compose) - green wash + left rail. */
+	div :global(.cm-added-line) {
+		background-color: rgba(34, 197, 94, 0.12);
+		box-shadow: inset 3px 0 0 rgba(34, 197, 94, 0.7);
 	}
 
 	/* Variable value overlay widget - base styles */

@@ -8,7 +8,8 @@
 	import { TogglePill, ToggleSwitch } from '$lib/components/ui/toggle-pill';
 	import CronEditor from '$lib/components/cron-editor.svelte';
 	import TimezoneSelector from '$lib/components/TimezoneSelector.svelte';
-	import { Eye, Bell, Database, Calendar, ShieldCheck, FileText, AlertTriangle, HelpCircle, Globe, Activity, Clock, Info, Save, RotateCcw, LayoutDashboard, Tags, Archive, ChevronRight, ChevronDown, Compass } from 'lucide-svelte';
+	import { Eye, Bell, Database, Calendar, ShieldCheck, FileText, AlertTriangle, HelpCircle, Globe, Activity, Clock, Info, Save, RotateCcw, LayoutDashboard, Tags, Archive, ChevronRight, ChevronDown, Compass, Layers } from 'lucide-svelte';
+	import { STACK_LOG_OPERATIONS, type StackLogOperation } from '$lib/utils/stack-log-operations';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 	import { appSettings, type DateFormat, type DownloadFormat, type EventCollectionMode, type LabelFilterMode } from '$lib/stores/settings';
 	import { canAccess, authStore } from '$lib/stores/auth';
@@ -17,6 +18,7 @@
 	import NavigationSelector from '$lib/components/NavigationSelector.svelte';
 	import AnimateIconsToggle from '$lib/components/AnimateIconsToggle.svelte';
 	import IndentGuidesToggle from '$lib/components/IndentGuidesToggle.svelte';
+	import EditorThemeSelector from '$lib/components/EditorThemeSelector.svelte';
 	import ColoredActionsToggle from '$lib/components/ColoredActionsToggle.svelte';
 	import SemverCheckConfig from '$lib/components/SemverCheckConfig.svelte';
 	import { onMount } from 'svelte';
@@ -31,6 +33,7 @@
 	let showGitCommitHash = $derived($appSettings.showGitCommitHash);
 	let honorProxyLabels = $derived($appSettings.honorProxyLabels);
 	let showImageChangelogLinks = $derived($appSettings.showImageChangelogLinks);
+	let useSelfhstIcons = $derived($appSettings.useSelfhstIcons);
 	let showWhatsNew = $derived($appSettings.showWhatsNew);
 	let timeFormat = $derived($appSettings.timeFormat);
 	let dateFormat = $derived($appSettings.dateFormat);
@@ -41,6 +44,14 @@
 	let defaultTrivyImage = $derived($appSettings.defaultTrivyImage);
 	let defaultScannerNetworkMode = $derived($appSettings.defaultScannerNetworkMode);
 	let defaultScannerDns = $derived($appSettings.defaultScannerDns);
+	let stackLogOperations = $derived($appSettings.stackLogOperations);
+
+	function toggleStackLogOperation(op: StackLogOperation, show: boolean) {
+		const next = show
+			? [...stackLogOperations, op]
+			: stackLogOperations.filter((o) => o !== op);
+		appSettings.setStackLogOperations(next);
+	}
 	let showAdvancedScannerSettings = $state(false);
 	let defaultComposeTemplate = $derived($appSettings.defaultComposeTemplate);
 	let labelFilterMode = $derived($appSettings.labelFilterMode);
@@ -90,6 +101,8 @@ services:
 	let eventCleanupEnabled = $derived($appSettings.eventCleanupEnabled);
 	let scannerCleanupCron = $derived($appSettings.scannerCleanupCron);
 	let scannerCleanupEnabled = $derived($appSettings.scannerCleanupEnabled);
+	let deployLogReconcileCron = $derived($appSettings.deployLogReconcileCron);
+	let deployLogReconcileEnabled = $derived($appSettings.deployLogReconcileEnabled);
 	let logMaxLines = $derived($appSettings.logMaxLines);
 	let formatLogTimestamps = $derived($appSettings.formatLogTimestamps);
 	let defaultTimezone = $derived($appSettings.defaultTimezone);
@@ -184,6 +197,17 @@ services:
 		const newState = !scannerCleanupEnabled;
 		appSettings.setScannerCleanupEnabled(newState);
 		toast.success(newState ? 'Scanner cleanup enabled' : 'Scanner cleanup disabled');
+	}
+
+	function handleDeployLogReconcileCronChange(cron: string) {
+		appSettings.setDeployLogReconcileCron(cron);
+		toast.success('Deploy log reconcile cron updated');
+	}
+
+	function handleDeployLogReconcileEnabledChange() {
+		const newState = !deployLogReconcileEnabled;
+		appSettings.setDeployLogReconcileEnabled(newState);
+		toast.success(newState ? 'Deploy log reconcile enabled' : 'Deploy log reconcile disabled');
 	}
 
 	function handleGrypeImageBlur(e: Event) {
@@ -292,6 +316,15 @@ services:
 	let semverIncludePrerelease = $state(false);
 	let semverLoaded = $state(false);
 
+	// The global theme defaults (what a new user starts with). With auth on the theme
+	// toggles here edit these, not the admin's own profile. Rendering waits on
+	// globalThemeLoaded: until the fetch fills these, a toggle handed globalValue=undefined
+	// would fall back to the admin's personal store value and show it.
+	let globalColoredActions = $state<boolean | undefined>(undefined);
+	let globalAnimateIcons = $state<boolean | undefined>(undefined);
+	let globalIndentGuides = $state<boolean | undefined>(undefined);
+	let globalThemeLoaded = $state(false);
+
 	onMount(async () => {
 		try {
 			const res = await fetch('/api/settings/semver');
@@ -302,8 +335,26 @@ services:
 				semverMatchFlavor = c.matchFlavor ?? true;
 				semverIncludePrerelease = c.includePrerelease ?? false;
 			}
-		} catch { /* keep defaults */ }
-		semverLoaded = true;
+			// A refusal means the values on screen are the built-in defaults, never the
+			// configuration, so the save effect stays disarmed rather than writing a
+			// guess over it. Any other failure still arms it: the controls are visible
+			// and edits have to reach the server rather than vanish.
+			semverLoaded = res.status !== 401 && res.status !== 403;
+		} catch {
+			// The request never landed, so nothing says this account may not save.
+			semverLoaded = true;
+		}
+
+		try {
+			const res = await fetch('/api/settings/general');
+			if (res.ok) {
+				const g = await res.json();
+				globalColoredActions = !!g.coloredActionButtons;
+				globalAnimateIcons = g.animateIcons ?? true;
+				globalIndentGuides = !!g.editorIndentGuides;
+			}
+		} catch { /* toggles fall back to store when global value is unknown */ }
+		globalThemeLoaded = true;
 	});
 
 	async function saveSemverConfig() {
@@ -413,6 +464,28 @@ services:
 							</div>
 							<div class="space-y-1">
 								<div class="flex items-center gap-3">
+									<Label>Use selfh.st icons</Label>
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											<HelpCircle class="w-3.5 h-3.5 text-muted-foreground" />
+										</Tooltip.Trigger>
+										<Tooltip.Content side="top" class="w-96 max-w-[90vw]">
+											<p>Show app logos from <a href="https://selfh.st" target="_blank" rel="noopener" class="underline">selfh.st</a> as container icons, matched automatically from the image name. Logos are fetched once and cached locally, so your browser never contacts an external CDN. Off by default. Logos are CC BY 4.0; product names and trademarks are the property of their respective owners and are shown for identification only, without implying endorsement.</p>
+										</Tooltip.Content>
+									</Tooltip.Root>
+									<TogglePill
+										checked={useSelfhstIcons}
+										onchange={(checked) => {
+											appSettings.setUseSelfhstIcons(checked);
+											toast.success(checked ? 'selfh.st icons enabled' : 'selfh.st icons disabled');
+										}}
+										disabled={!$canAccess('settings', 'edit')}
+									/>
+								</div>
+								<p class="text-xs text-muted-foreground">Auto app logos on containers, fetched from selfh.st and cached locally</p>
+							</div>
+							<div class="space-y-1">
+								<div class="flex items-center gap-3">
 									<Label>Show "What's New"</Label>
 									<TogglePill
 										checked={showWhatsNew}
@@ -505,71 +578,89 @@ services:
 								</div>
 								<p class="text-xs text-muted-foreground">Show URLs inferred from Traefik and Pangolin labels alongside dockhand.url</p>
 							</div>
-							<div class="space-y-1">
-								<div class="flex items-center gap-3">
-									<Label>Time format</Label>
-									<ToggleSwitch
-										value={timeFormat}
-										leftValue="24h"
-										rightValue="12h"
-										onchange={(newFormat) => {
-											appSettings.setTimeFormat(newFormat as '12h' | '24h');
-											toast.success(`Time format set to ${newFormat === '12h' ? '12-hour (AM/PM)' : '24-hour'}`);
-										}}
-										disabled={!$canAccess('settings', 'edit')}
-									/>
-								</div>
-								<p class="text-xs text-muted-foreground">Display timestamps in 12-hour (AM/PM) or 24-hour format</p>
-							</div>
-							<div class="space-y-1">
-								<div class="flex items-center gap-3">
-									<Label>Date format</Label>
-									<Select.Root
-										type="single"
-										value={dateFormat}
-										onValueChange={(value) => {
-											if (value) {
-												appSettings.setDateFormat(value as DateFormat);
-												toast.success(`Date format set to ${value}`);
-											}
-										}}
-										disabled={!$canAccess('settings', 'edit')}
-									>
-										<Select.Trigger class="w-[180px]">
-											<Calendar class="w-4 h-4 mr-2" />
-											<span>{dateFormat}</span>
-										</Select.Trigger>
-										<Select.Content>
-											{#each dateFormatOptions as option}
-												<Select.Item value={option.value}>
-													<div class="flex items-center justify-between w-full gap-4">
-														<span>{option.label}</span>
-														<span class="text-xs text-muted-foreground">{option.example}</span>
-													</div>
-												</Select.Item>
-											{/each}
-										</Select.Content>
-									</Select.Root>
-								</div>
-								<p class="text-xs text-muted-foreground">How dates are displayed throughout the app</p>
-							</div>
 						</div>
 						<!-- Right column: Theme settings (always shown, with hint when auth enabled) -->
 						<div class="space-y-4">
 							<ThemeSelector />
-							<ColoredActionsToggle />
-							<AnimateIconsToggle />
-							<IndentGuidesToggle />
+							<!-- With auth on the toggles edit the GLOBAL defaults, so they wait for
+							     those to load; binding globalValue=undefined first would show the
+							     admin's own profile value. With auth off the store IS the global
+							     value, so they render immediately. -->
+							{#if !$authStore.authEnabled || globalThemeLoaded}
+								<ColoredActionsToggle globalValue={$authStore.authEnabled ? globalColoredActions : undefined} />
+								<AnimateIconsToggle globalValue={$authStore.authEnabled ? globalAnimateIcons : undefined} />
+								<IndentGuidesToggle globalValue={$authStore.authEnabled ? globalIndentGuides : undefined} />
+							{/if}
 							{#if $authStore.authEnabled}
 								<div class="text-xs text-muted-foreground flex items-start gap-1.5 mt-2 p-2 bg-muted/50 rounded-md">
 									<HelpCircle class="w-3.5 h-3.5 shrink-0 mt-0.5" />
 									<div>
-										<p>Personal theme preferences can be configured in your <a href="/profile" class="text-primary hover:underline">profile</a>.</p>
+										<p>These are the <strong>defaults for new users</strong> - they don't change your own view. To customise how <em>you</em> see the app, use the theme settings in your <a href="/profile" class="text-primary hover:underline">profile</a>.</p>
 									</div>
 								</div>
 							{/if}
 						</div>
 					</div>
+				<!-- Time + date format span the full card width, two columns, so they get
+				     room instead of crowding inside the narrow settings column. -->
+				<div class="mt-4 border-t pt-4">
+					<div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+						<div class="space-y-1">
+							<div class="flex items-center gap-3">
+								<Label>Time format</Label>
+								<ToggleSwitch
+									value={timeFormat}
+									leftValue="24h"
+									rightValue="12h"
+									onchange={(newFormat) => {
+										appSettings.setTimeFormat(newFormat as '12h' | '24h');
+										toast.success(`Time format set to ${newFormat === '12h' ? '12-hour (AM/PM)' : '24-hour'}`);
+									}}
+									disabled={!$canAccess('settings', 'edit')}
+								/>
+							</div>
+							<p class="text-xs text-muted-foreground">Clock display used throughout the app</p>
+						</div>
+						<div class="space-y-1">
+							<div class="flex items-center gap-3">
+								<Label>Date format</Label>
+								<Select.Root
+									type="single"
+									value={dateFormat}
+									onValueChange={(value) => {
+										if (value) {
+											appSettings.setDateFormat(value as DateFormat);
+											toast.success(`Date format set to ${value}`);
+										}
+									}}
+									disabled={!$canAccess('settings', 'edit')}
+								>
+									<Select.Trigger class="w-[180px]">
+										<Calendar class="w-4 h-4 mr-2" />
+										<span>{dateFormat}</span>
+									</Select.Trigger>
+									<Select.Content>
+										{#each dateFormatOptions as option}
+											<Select.Item value={option.value}>
+												<div class="flex items-center justify-between w-full gap-4">
+													<span>{option.label}</span>
+													<span class="text-xs text-muted-foreground">{option.example}</span>
+												</div>
+											</Select.Item>
+										{/each}
+									</Select.Content>
+								</Select.Root>
+							</div>
+							<p class="text-xs text-muted-foreground">Date display used throughout the app</p>
+						</div>
+					</div>
+				</div>
+				<!-- Editor theme spans the full card width so the live preview isn't cramped. -->
+				{#if !$authStore.authEnabled || globalThemeLoaded}
+					<div class="mt-4 border-t pt-4">
+						<EditorThemeSelector />
+					</div>
+				{/if}
 				</Card.Content>
 			</Card.Root>
 
@@ -722,6 +813,30 @@ services:
 			<Card.Root>
 				<Card.Header>
 					<Card.Title class="text-sm font-medium flex items-center gap-2">
+						<Layers class="w-4 h-4" />
+						Stack operation logs
+					</Card.Title>
+					<p class="text-xs text-muted-foreground">Choose which stack operations open the full compose-log popover. Unchecked operations run quietly with just a toast; their log still opens automatically if the operation fails.</p>
+				</Card.Header>
+				<Card.Content>
+					<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-3">
+						{#each STACK_LOG_OPERATIONS as op}
+							<div class="flex items-center gap-3">
+								<TogglePill
+									checked={stackLogOperations.includes(op.key)}
+									onchange={(checked) => toggleStackLogOperation(op.key, checked)}
+									disabled={!$canAccess('settings', 'edit')}
+								/>
+								<Label>{op.label}</Label>
+							</div>
+						{/each}
+					</div>
+				</Card.Content>
+			</Card.Root>
+
+			<Card.Root>
+				<Card.Header>
+					<Card.Title class="text-sm font-medium flex items-center gap-2">
 						<FileText class="w-4 h-4" />
 						Compose template
 					</Card.Title>
@@ -756,6 +871,10 @@ services:
 
 		<!-- Right column -->
 		<div class="space-y-4">
+			<!-- Held to settings:view: these describe how this installation is built
+			     and run, and showing the built-in defaults to somebody who may not read
+			     them would present a guess as the configuration. -->
+			{#if $canAccess('settings', 'view')}
 			<Card.Root>
 				<Card.Header>
 					<Card.Title class="text-sm font-medium flex items-center gap-2">
@@ -875,7 +994,12 @@ services:
 					</div>
 				</Card.Content>
 			</Card.Root>
+			{/if}
 
+			<!-- Held to settings:view with the rest: it decides how every update check
+			     compares versions, and the defaults shown to somebody who may not read
+			     it would be saved over the real configuration on the first change. -->
+			{#if $canAccess('settings', 'view')}
 			<Card.Root>
 				<Card.Header>
 					<Card.Title class="text-sm font-medium flex items-center gap-2">
@@ -897,7 +1021,12 @@ services:
 					/>
 				</Card.Content>
 			</Card.Root>
+			{/if}
 
+			<!-- Held to settings:view: these describe how this installation is built
+			     and run, and showing the built-in defaults to somebody who may not read
+			     them would present a guess as the configuration. -->
+			{#if $canAccess('settings', 'view')}
 			<Card.Root>
 				<Card.Header>
 					<Card.Title class="text-sm font-medium flex items-center gap-2">
@@ -1100,6 +1229,42 @@ services:
 					</div>
 					<div class="space-y-1 pt-2 border-t">
 						<div class="flex items-center gap-3">
+							<Label>Deploy log reconcile</Label>
+							<Tooltip.Provider delayDuration={100}>
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										<HelpCircle class="w-4 h-4 text-muted-foreground cursor-help" />
+									</Tooltip.Trigger>
+									<Tooltip.Portal>
+										<Tooltip.Content side="right" sideOffset={8} class="!w-80">
+											Every deploy from Dockhand keeps a log file on disk, linked to its run in the
+											Deploys tab. This job runs on a schedule to keep the two in sync: it deletes
+											orphaned log files whose deploy run was already removed, and marks a run whose
+											log file has gone missing (so the Deploys tab shows "log unavailable" instead
+											of a blank). It never deletes a deploy run itself.
+										</Tooltip.Content>
+									</Tooltip.Portal>
+								</Tooltip.Root>
+							</Tooltip.Provider>
+							<TogglePill
+								checked={deployLogReconcileEnabled}
+								onchange={handleDeployLogReconcileEnabledChange}
+								disabled={!$canAccess('settings', 'edit')}
+							/>
+						</div>
+						<p class="text-xs text-muted-foreground">Keeps deploy-log files in sync with their deploy records: removes logs whose run is gone, and flags runs whose log went missing (never deletes a run).</p>
+						{#if deployLogReconcileEnabled}
+							<div class="mt-2">
+								<CronEditor
+									value={deployLogReconcileCron}
+									onchange={handleDeployLogReconcileCronChange}
+									disabled={!$canAccess('settings', 'edit')}
+								/>
+							</div>
+						{/if}
+					</div>
+					<div class="space-y-1 pt-2 border-t">
+						<div class="flex items-center gap-3">
 							<Label>Protect scanner images from prune</Label>
 							<Tooltip.Root>
 								<Tooltip.Trigger>
@@ -1122,6 +1287,7 @@ services:
 					</div>
 				</Card.Content>
 			</Card.Root>
+			{/if}
 
 			<Card.Root>
 				<Card.Header>
@@ -1134,14 +1300,14 @@ services:
 					<div class="space-y-3">
 						<div class="space-y-1">
 							<div class="flex items-center gap-3">
-								<Label>Label filter matching</Label>
+								<Label>Environment label filter matching</Label>
 								<Tooltip.Root>
 									<Tooltip.Trigger>
 										<HelpCircle class="w-3.5 h-3.5 text-muted-foreground" />
 									</Tooltip.Trigger>
 									<Tooltip.Content class="w-80">
 										<p class="text-xs">
-											Controls how multiple selected labels filter environments on the dashboard.
+											Controls how multiple selected environment labels filter environments on the dashboard.
 											<strong>"Any"</strong>: shows environments that have at least one of the selected labels.
 											<strong>"All"</strong>: shows only environments that have every selected label.
 										</p>

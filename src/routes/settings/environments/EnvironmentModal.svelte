@@ -86,6 +86,7 @@
 	import { licenseStore } from '$lib/stores/license';
 	import { formatDateTime, formatDate } from '$lib/stores/settings';
 	import { getLabelColor, getLabelBgColor, parseLabels, MAX_LABELS } from '$lib/utils/label-colors';
+	import { MEMORY_SUPPORT_DOC_URL } from '$lib/utils/memory-support';
 	import { labelColorOverrides } from '$lib/stores/label-colors';
 	import EventTypesEditor from './EventTypesEditor.svelte';
 	import UpdatesTab from './tabs/UpdatesTab.svelte';
@@ -109,7 +110,10 @@
 		protocol: string;
 		tlsCa?: string;
 		tlsCert?: string;
-		tlsKey?: string;
+		// tlsKey / hawserToken are never returned by the API (write-only secrets); the
+		// has* flags say whether one is stored.
+		hasTlsKey?: boolean;
+		hasHawserToken?: boolean;
 		tlsSkipVerify?: boolean;
 		icon?: string;
 		socketPath?: string;
@@ -122,6 +126,7 @@
 		hawserAgentName?: string;
 		hawserVersion?: string;
 		hawserCapabilities?: string;
+		labels?: string;
 		publicIp?: string;
 		createdAt: string;
 		updatedAt: string;
@@ -281,6 +286,9 @@
 	let formTlsCa = $state('');
 	let formTlsCert = $state('');
 	let formTlsKey = $state('');
+	// Whether the environment already has a stored tlsKey (the value itself is never
+	// returned by the API). Drives the "leave blank to keep" hint on the field.
+	let hasStoredTlsKey = $state(false);
 	let formTlsSkipVerify = $state(false);
 	let formIcon = $state('globe');
 	let pendingIconData = $state<string | null>(null);
@@ -294,6 +302,11 @@
 	let formHighlightChanges = $state(true);
 	let formDiskWarningEnabled = $state(true);
 	let formDiskWarningMode = $state<'percentage' | 'absolute'>('percentage');
+	/** Whether this host reports a total for percentage warnings; null = not asked yet. */
+	let formPercentageSupported = $state<boolean | null>(null);
+	let formStorageDriver = $state<string | null>(null);
+	/** The mode the server has, kept apart from the form so edits cannot lock it out. */
+	let storedDiskWarningMode = $state<'percentage' | 'absolute' | null>(null);
 	let formDiskWarningThreshold = $state(80);
 	let formDiskWarningThresholdGb = $state(50);
 	let formConnectionType = $state<ConnectionType>('socket');
@@ -303,6 +316,8 @@
 	const usesStackPath = (ct: ConnectionType) => ct === 'direct' || ct === 'hawser-standard' || ct === 'hawser-edge';
 	const isHawserConn = (ct: ConnectionType) => ct === 'hawser-standard' || ct === 'hawser-edge';
 	let formHawserToken = $state('');
+	// Whether a hawser token is already stored (value never returned by the API).
+	let hasStoredHawserToken = $state(false);
 	let formLabels = $state<string[]>([]);
 	let newLabelInput = $state('');
 	let showLabelDropdown = $state(false);
@@ -485,6 +500,9 @@
 	// Test connection state
 	let testingConnection = $state(false);
 	let testResult = $state<{ success: boolean; info?: any; error?: string; isEdgeMode?: boolean } | null>(null);
+	// Shown when a successful Test connection reveals the daemon's kernel has cgroup
+	// memory accounting disabled (per-container memory shows 0 - common on Raspberry Pi).
+	let memWarnOpen = $state(false);
 
 	// Socket detection state
 	let detectingSockets = $state(false);
@@ -578,7 +596,11 @@
 			formProtocol = environment.protocol;
 			formTlsCa = environment.tlsCa || '';
 			formTlsCert = environment.tlsCert || '';
-			formTlsKey = environment.tlsKey || '';
+			// The API never returns the tlsKey / hawserToken secrets (they're stripped
+			// server-side). Start blank and remember whether one is stored so the field
+			// can say "leave blank to keep"; a blank submit keeps the existing secret.
+			formTlsKey = '';
+			hasStoredTlsKey = !!environment.hasTlsKey;
 			formTlsSkipVerify = environment.tlsSkipVerify ?? false;
 			formIcon = environment.icon || 'globe';
 			formSocketPath = environment.socketPath || '/var/run/docker.sock';
@@ -586,10 +608,16 @@
 			formCollectMetrics = environment.collectMetrics ?? true;
 			formHighlightChanges = environment.highlightChanges ?? true;
 			formConnectionType = (environment.connectionType as ConnectionType) || 'socket';
-			formHawserToken = environment.hawserToken || '';
+			formHawserToken = '';
+			hasStoredHawserToken = !!environment.hasHawserToken;
 			formLabels = parseLabels(environment.labels);
 			newLabelInput = '';
 			formPublicIp = environment.publicIp || '';
+			// Unknown until this environment's own host answers: the previous one's
+			// verdict must not be shown against a different host.
+			formPercentageSupported = null;
+			formStorageDriver = null;
+			storedDiskWarningMode = null;
 			modalTab = 'general';
 			// Reset icon state
 			pendingIconData = null;
@@ -620,6 +648,7 @@
 			formTlsCa = '';
 			formTlsCert = '';
 			formTlsKey = '';
+			hasStoredTlsKey = false;
 			formTlsSkipVerify = false;
 			formIcon = 'globe';
 			pendingIconData = null;
@@ -629,10 +658,14 @@
 			formHighlightChanges = true;
 			formDiskWarningEnabled = true;
 			formDiskWarningMode = 'percentage';
+			formPercentageSupported = null;
+			formStorageDriver = null;
+			storedDiskWarningMode = null;
 			formDiskWarningThreshold = 80;
 			formDiskWarningThresholdGb = 50;
 			formConnectionType = 'socket';
 			formHawserToken = '';
+			hasStoredHawserToken = false;
 			formLabels = [];
 			newLabelInput = '';
 			formPublicIp = '';
@@ -727,7 +760,10 @@
 					tlsCert: cleanCertificate(formTlsCert),
 					tlsKey: cleanCertificate(formTlsKey),
 					tlsSkipVerify: formTlsSkipVerify,
-					hawserToken: formHawserToken || pendingToken
+					hawserToken: formHawserToken || pendingToken,
+					// When editing, let the server fall back to the stored token/key for any
+					// secret the form left blank (secrets are never sent back to the client) (#1483).
+					environmentId: isEditing && environment ? environment.id : undefined
 				})
 			});
 
@@ -739,6 +775,9 @@
 					toast.info('Edge mode - connection will be tested when agent connects');
 				} else {
 					toast.success(`Connected! Docker ${result.info.serverVersion} - ${result.info.containers} containers`);
+					// Docker reports the kernel's cgroup memory controller is off -> container
+					// memory will show 0. Surface it now so the user isn't left guessing.
+					if (result.info.showMemoryWarning) memWarnOpen = true;
 				}
 			} else {
 				toast.error(result.error || 'Connection failed');
@@ -1053,8 +1092,11 @@
 				const data = await response.json();
 				formDiskWarningEnabled = data.enabled ?? true;
 				formDiskWarningMode = data.mode ?? 'percentage';
+				storedDiskWarningMode = formDiskWarningMode;
 				formDiskWarningThreshold = data.threshold ?? 80;
 				formDiskWarningThresholdGb = data.thresholdGb ?? 50;
+				formPercentageSupported = data.percentageSupported ?? null;
+				formStorageDriver = data.storageDriver ?? null;
 			}
 		} catch (error) {
 			console.error('Failed to load disk warning settings:', error);
@@ -1986,10 +2028,11 @@
 														A direct daemon shares no filesystem with Dockhand. When set, Dockhand copies each
 														stack's folder to
 														<code class="bg-muted px-1 rounded">&lt;this path&gt;/&lt;stack&gt;</code>
-														<span class="font-medium text-foreground">on the remote host</span> so the backup
+														<span class="font-medium text-foreground">on the remote host</span>
+														<span class="font-medium text-foreground">on each deploy</span> so the backup
 														helper can read the compose and config, and rewrites relative binds
 														(<code class="bg-muted px-1 rounded">./data</code>) to that host path so they resolve
-														on the remote daemon.
+														on the remote daemon. After setting this, redeploy a stack once so its files are staged there.
 													</p>
 													<p class="text-muted-foreground">
 														Leave empty to skip this: the stack won't be backupable and a relative bind resolves
@@ -2015,6 +2058,8 @@
 										Absolute path on the remote host where Dockhand keeps this stack's files, so its compose
 										and config are backupable and relative binds resolve on the remote daemon. Leave empty to
 										use only absolute paths or named volumes.
+										<span class="text-foreground font-medium">Takes effect on the next deploy</span> - after
+										setting this, redeploy each stack so Dockhand stages its files there.
 									{/if}
 								</p>
 							</div>
@@ -2137,7 +2182,7 @@
 										<textarea
 											id="edit-env-tls_key"
 											bind:value={formTlsKey}
-											placeholder="-----BEGIN PRIVATE KEY-----"
+											placeholder={hasStoredTlsKey ? 'Configured - leave blank to keep, or paste a new key to replace it' : '-----BEGIN PRIVATE KEY-----'}
 											class="flex min-h-[60px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
 										></textarea>
 									</div>
@@ -2245,7 +2290,7 @@
 										</Button>
 									{/if}
 								</div>
-								<Input id="edit-env-hawser-token" type="password" bind:value={formHawserToken} placeholder="Token for agent authentication" oninput={() => generatedStandardToken = null} />
+								<Input id="edit-env-hawser-token" type="password" bind:value={formHawserToken} placeholder={hasStoredHawserToken ? 'Configured - leave blank to keep, or enter a new token to replace it' : 'Token for agent authentication'} oninput={() => generatedStandardToken = null} />
 								{#if generatedStandardToken}
 									<div class="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-700 rounded-md space-y-2">
 										<p class="text-xs font-medium text-amber-700 dark:text-amber-400 flex items-center gap-1">
@@ -2600,6 +2645,9 @@
 						bind:diskWarningMode={formDiskWarningMode}
 						bind:diskWarningThreshold={formDiskWarningThreshold}
 						bind:diskWarningThresholdGb={formDiskWarningThresholdGb}
+						percentageSupported={formPercentageSupported}
+						storageDriver={formStorageDriver}
+						{storedDiskWarningMode}
 					/>
 				</Tabs.Content>
 
@@ -3124,6 +3172,36 @@
 			onCancel={() => showIconCropper = false}
 			onSave={handleIconCropSave}
 		/>
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- Kernel cgroup memory accounting is disabled on this daemon (container memory shows 0). -->
+<Dialog.Root bind:open={memWarnOpen}>
+	<Dialog.Content class="max-w-md">
+		<Dialog.Header>
+			<Dialog.Title class="flex items-center gap-2 text-amber-600 dark:text-amber-400">
+				<AlertTriangle class="w-5 h-5" />
+				Container memory won't be shown
+			</Dialog.Title>
+		</Dialog.Header>
+		<div class="text-sm text-muted-foreground space-y-3">
+			<p>
+				This host's kernel has cgroup memory accounting disabled, so Docker can't report
+				per-container memory - it will show <span class="font-medium text-foreground whitespace-nowrap">0&nbsp;B</span>
+				for every container. This is common on Raspberry Pi and some ARM boards.
+			</p>
+			<p>
+				It's fixed in the kernel boot config, not in Dockhand. See the guide:
+				<a href={MEMORY_SUPPORT_DOC_URL} target="_blank" rel="noopener noreferrer"
+					class="text-primary hover:underline inline-flex items-center gap-1">
+					enabling container memory accounting
+					<ExternalLink class="w-3 h-3" />
+				</a>
+			</p>
+		</div>
+		<Dialog.Footer>
+			<Button onclick={() => (memWarnOpen = false)}>OK</Button>
+		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
 

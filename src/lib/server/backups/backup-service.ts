@@ -468,7 +468,7 @@ export class BackupService {
 			const { code, message } = errorInfo(err);
 			try { await this.ports.setConfigStatus(job.configId, 'failed'); } catch { /* non-fatal */ }
 			await op.close({ kind: 'error', code, message }, { errorCode: code });
-			try { await this.ports.notify('backup_failed', { title: 'Backup failed', message: `Backup of "${job.targetName}" failed: ${message} (${code})`, type: 'error', target: job.targetName, kind: 'backup', errorCode: code, message }, envId); } catch { /* non-fatal */ }
+			try { await this.ports.notify('backup_failed', { title: 'Backup failed', message: `Backup of "${job.targetName}" failed: ${message} (${code})`, type: 'error', target: job.targetName, kind: 'backup', errorCode: code }, envId); } catch { /* non-fatal */ }
 			// Per-config failure webhook.
 			if (job.options.webhookFailure) {
 				try {

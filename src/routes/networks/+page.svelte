@@ -7,9 +7,9 @@
 	import { toast } from 'svelte-sonner';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
-	import { Trash2, Search, Plus, Eye, Check, XCircle, RefreshCw, Icon, AlertTriangle, X, Network, Link, Copy, CopyPlus, Share2, Server, Globe, MonitorSmartphone, Cpu, CircleOff, GitGraph } from 'lucide-svelte';
+	import { Trash2, Plus, Eye, Check, XCircle, RefreshCw, Icon, AlertTriangle, X, Network, Link, Copy, CopyPlus, Share2, Server, Globe, MonitorSmartphone, Cpu, CircleOff, GitGraph } from 'lucide-svelte';
 	import { broom } from '@lucide/lab';
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
@@ -24,7 +24,7 @@
 	import { EmptyState, NoEnvironment } from '$lib/components/ui/empty-state';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import { DataGrid } from '$lib/components/data-grid';
-	import { ipToNumber } from '$lib/utils/ip';
+	import { compareIps } from '$lib/utils/ip';
 	import NetworkGraphModal from './NetworkGraphModal.svelte';
 
 	type SortField = 'name' | 'driver' | 'containers' | 'subnet' | 'gateway';
@@ -226,10 +226,10 @@
 					cmp = Object.keys(a.containers || {}).length - Object.keys(b.containers || {}).length;
 					break;
 				case 'subnet':
-					cmp = ipToNumber(getNetworkSubnet(a)) - ipToNumber(getNetworkSubnet(b));
+					cmp = compareIps(getNetworkSubnet(a), getNetworkSubnet(b));
 					break;
 				case 'gateway':
-					cmp = ipToNumber(getNetworkGateway(a)) - ipToNumber(getNetworkGateway(b));
+					cmp = compareIps(getNetworkGateway(a), getNetworkGateway(b));
 					break;
 			}
 			// Secondary sort by name for stability when primary values are equal
@@ -505,16 +505,7 @@
 	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
 		<PageHeader icon={Network} title="Networks" count={networks.length} />
 		<div class="flex flex-wrap items-center gap-2">
-			<div class="relative">
-				<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-				<Input
-					type="text"
-					placeholder="Search networks..."
-					bind:value={searchInput}
-					onkeydown={(e) => e.key === 'Escape' && (searchInput = '')}
-					class="pl-8 h-8 w-48 text-sm"
-				/>
-			</div>
+			<SearchInput bind:value={searchInput} placeholder="Search networks..." class="h-8 w-48 text-sm" />
 			<!-- Driver filter -->
 			<MultiSelectFilter
 				bind:value={selectedDrivers}

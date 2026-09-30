@@ -32,7 +32,7 @@ export interface UpdateCheckResult {
  * @openapi
  * summary: Read the cached pending image-update records for an environment (no fresh check; requires the 'view' permission)
  * description: Returns the containers currently flagged as having a pending image update from the last check. Does not trigger a new check — use POST to run a fresh check.
- * query: env:integer The target environment ID (omit for the local/default Docker host) (from GET /api/environments)
+ * query: env:integer! The target environment ID the container lives in (from GET /api/environments)
  * resp-200: {environmentId:integer!, pendingUpdates:array<{containerId:string!, containerName:string!, currentImage:string!, checkedAt:string}>!}
  * resp-400: Environment ID required
  * resp-403: Permission denied
@@ -75,7 +75,7 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
  *
  * @openapi
  * summary: Trigger a fresh image-update check across all (non-hidden, non-podman-infra) containers in an environment
- * query: env:integer The target environment ID (omit for the local/default Docker host) (from GET /api/environments)
+ * query: env:integer! The target environment ID the container lives in (from GET /api/environments)
  * resp-200: text/event-stream job stream ("progress" events with {checked,total}, final "result" event with {total,updatesFound,results}) — or, with "Accept: application/json", the final result as plain JSON
  * resp-403: Permission denied
  */
@@ -150,13 +150,19 @@ export const POST: RequestHandler = async ({ url, cookies, request }) => {
 
 				const result = await checkImageUpdateAvailable(imageName, currentImageId, envIdNum);
 
+				// System containers (Dockhand itself, Hawser) have their own update path and are
+				// never shown/counted as a container update, so skip the extra registry call and
+				// never emit a newerVersion for them - otherwise the "found updates" notification
+				// counts a suggestion the UI deliberately hides (#1466).
+				const systemContainer = isSystemContainer(imageName) || null;
+
 				// Newer-version-tag detection (opt-in). Skips instantly for floating tags,
 				// so it only hits the registry for pinned versions. Never throws.
-				const newerVersion = semverEnabled
+				const newerVersion = semverEnabled && !systemContainer
 					? await checkNewerVersion(imageName, {
 							...semverOptions,
 							versionPattern: getVersionPatternOverride(inspectData.Config?.Labels)
-						}, getTagArtifactKind).catch(() => null)
+						}, getTagArtifactKind, result.localDigests ?? []).catch(() => null)
 					: null;
 
 				return {
@@ -168,7 +174,7 @@ export const POST: RequestHandler = async ({ url, cookies, request }) => {
 					newDigest: result.registryDigest,
 					error: result.error,
 					isLocalImage: result.isLocalImage,
-					systemContainer: isSystemContainer(imageName) || null,
+					systemContainer,
 					updateDisabled,
 					newerVersion: newerVersion ?? undefined
 				};

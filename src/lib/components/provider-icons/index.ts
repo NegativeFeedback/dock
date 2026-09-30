@@ -6,6 +6,8 @@ import HashiCorpVault from './HashiCorpVault.svelte';
 import Doppler from './Doppler.svelte';
 import Bitwarden from './Bitwarden.svelte';
 import ProtonPass from './ProtonPass.svelte';
+import AzureKeyVault from './AzureKeyVault.svelte';
+import KeePassXC from './KeePassXC.svelte';
 
 /** Brand icon for a secret-provider type. Falls back to a generic key icon. */
 export function getProviderIcon(type: string): Component {
@@ -23,6 +25,10 @@ export function getProviderIcon(type: string): Component {
 			return Bitwarden;
 		case 'proton':
 			return ProtonPass;
+		case 'azure-kv':
+			return AzureKeyVault;
+		case 'keepass':
+			return KeePassXC;
 		default:
 			return KeyRound; // any future provider until it has a brand icon
 	}

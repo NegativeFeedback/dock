@@ -81,8 +81,10 @@
 		sidebar.setOpenMobile(false);
 		// Per-user layout must not leak to the next user on this browser
 		sidebarPreferencesStore.clearLocal();
-		await authStore.logout();
-		goto('/login');
+		// The store navigates away itself when the provider has a session to end, and
+		// that destination is already this same login page.
+		const { logoutUrl, next } = await authStore.logout();
+		if (!logoutUrl) goto(next);
 	}
 
 	/**
@@ -244,8 +246,7 @@
 		<!-- Expanded state: logo + collapse button -->
 		<div class="relative flex items-center justify-center w-full group-data-[state=collapsed]:hidden">
 			<a href="/?home" class="flex justify-center relative">
-				<img src="/logo-light.webp" alt="Dockhand Logo" class="h-[52px] w-auto object-contain mt-2 mb-1 dark:hidden" style="filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.3)) drop-shadow(-1px -1px 1px rgba(255,255,255,0.9));" />
-				<img src="/logo-dark.webp" alt="Dockhand Logo" class="h-[52px] w-auto object-contain mt-2 mb-1 hidden dark:block" style="filter: drop-shadow(2px 2px 3px rgba(0,0,0,0.6)) drop-shadow(-1px -1px 1px rgba(255,255,255,0.2));" />
+				<img src="/logo.svg" alt="Dockhand Logo" class="h-[52px] w-auto object-contain mt-2 mb-1" />
 				{#if $licenseStore.isEnterprise}
 					<Crown class="w-4 h-4 absolute top-0 -right-[6px] text-amber-500 fill-amber-400 drop-shadow-sm rotate-[20deg]" />
 				{/if}

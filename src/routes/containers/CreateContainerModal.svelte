@@ -54,6 +54,7 @@
 	let name = $state('');
 	let image = $state('');
 	let command = $state('');
+	let entrypoint = $state('');
 	let restartPolicy = $state('no');
 	let restartMaxRetries = $state<number | ''>('');
 	let networkMode = $state('bridge');
@@ -341,6 +342,7 @@
 				});
 
 			const cmd = command.trim() ? parseShellCommand(command.trim()) : undefined;
+			const entrypointArr = entrypoint.trim() ? parseShellCommand(entrypoint.trim()) : undefined;
 
 			let healthcheck: any = undefined;
 			if (healthcheckEnabled && healthcheckCommand.trim()) {
@@ -405,6 +407,7 @@
 				env: env.length > 0 ? env : undefined,
 				labels: Object.keys(labelsObj).length > 0 ? labelsObj : undefined,
 				cmd,
+				entrypoint: entrypointArr,
 				restartPolicy,
 				restartMaxRetries: restartPolicy === 'on-failure' && restartMaxRetries !== '' ? Number(restartMaxRetries) : undefined,
 				networkMode,
@@ -493,6 +496,7 @@
 		name = '';
 		image = '';
 		command = '';
+		entrypoint = '';
 		restartPolicy = 'no';
 		restartMaxRetries = '';
 		networkMode = 'bridge';
@@ -692,6 +696,7 @@
 				bind:name
 				bind:image
 				bind:command
+			bind:entrypoint
 				bind:restartPolicy
 				bind:restartMaxRetries
 				bind:networkMode
